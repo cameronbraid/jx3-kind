@@ -14,10 +14,16 @@ BOT_USER="jx3-bot"
 BOT_PASS="jx3-bot"
 SUBNET=${SUBNET:-"172.21.0.0/16"}
 GATEWAY=${GATEWAY:-"172.21.0.1"}
-PRELOAD_IMAGES=${PRELOAD_IMAGES:="true"}  # or false
+
 LOG=${LOG:-"file"} #or console
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
+
+DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
+DOCKER_REGISTRY_CACHE_FOLDER=${DOCKER_REGISTRY_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-proxy"}
+DOCKER_REGISTRY_CACHE_REGISTRIES=${DOCKER_REGISTRY_CACHE_REGISTRIES:-"k8s.gcr.io gcr.io quay.io registry.opensource.zalan.do"}
+DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES=${DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES:-""}
+HOST_IP=${HOST_IP:-"192.168.0.101"}  # only needed when using DOCKER_REGISTRY_PROXY="true"
 
 
 # thanks https://stackoverflow.com/questions/33056385/increment-ip-address-in-a-shell-script#43196141
@@ -104,6 +110,24 @@ FILE_BUCKETREPO_VALUES=`cat <<'EOF'
 envSecrets:
   AWS_ACCESS_KEY: "" # use secret-mapping to map from vault
   AWS_SECRET_KEY: "" # use secret-mapping to map from vault
+EOF
+`
+
+FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF=`cat <<EOF
+[Service]
+Environment="HTTP_PROXY=http://192.168.0.101:3128/"
+Environment="HTTPS_PROXY=http://192.168.0.101:3128/"
+Environment="NO_PROXY=localhost,docker-registry-jx.${IP}.nip.io"
+EOF
+`
+
+FILE_KIND_NODE_IMAGE_DOCKERFILE=`cat <<'EOF'
+FROM kindest/node:v1.19.1
+ADD http://192.168.0.101:3128/ca.crt /usr/share/ca-certificates/docker_registry_proxy.crt
+RUN echo "docker_registry_proxy.crt" >> /etc/ca-certificates.conf && \
+    update-ca-certificates --fresh && \
+    mkdir -p /etc/systemd/system/containerd.service.d/
+COPY http-proxy.conf /etc/systemd/system/containerd.service.d/
 EOF
 `
 
@@ -344,67 +368,25 @@ FILE_USER_JSON=`cat << 'EOF'
 EOF
 `
 
-loadImages() {
-  step "Load images to speed up installation"
-
-  # custom images to fix gitea related issues
-
-  # configured in jx-ligthhouse-values.yaml
-  # kind load docker-image gcr.io/jenkinsxio/lighthouse-keeper:jx3-kind-install --name=jx3
-  # kind load docker-image gcr.io/jenkinsxio/lighthouse-webhooks:jx3-kind-install --name=jx3
-
-  # configured in jx-build-controller-values.yaml
-  # kind load docker-image gcr.io/jenkinsxio/jx-build-controller:jx3-kind-install --name=jx3
-
-
-  # speed up provisioning   NOTE these versions will drift
-  loadImage docker.io/banzaicloud/bank-vaults:master
-  loadImage docker.io/banzaicloud/vault-operator:1.3.0
-  loadImage docker.io/bitnami/memcached:1.6.6-debian-10-r54
-  loadImage docker.io/gitea/gitea:1.13.0
-  loadImage docker.io/godaddy/kubernetes-external-secrets:6.0.0
-  loadImage docker.io/jettech/kube-webhook-certgen:v1.5.0
-  loadImage docker.io/kindest/kindnetd:v20200725-4d6bea59
-  loadImage docker.io/library/registry:2.7.1
-  loadImage docker.io/library/vault:1.3.1
-  loadImage docker.io/minio/mc:RELEASE.2020-11-25T23-04-07Z
-  loadImage docker.io/minio/minio:RELEASE.2020-12-03T05-49-24Z
-  loadImage docker.io/prom/statsd-exporter:latest
-  loadImage docker.io/rancher/local-path-provisioner:v0.0.14
-  loadImage gcr.io/jenkinsxio/bucketrepo:0.1.53
-  loadImage gcr.io/jenkinsxio/jx-boot:3.1.62
-  loadImage gcr.io/jenkinsxio/jx-boot:3.1.83
-  loadImage gcr.io/jenkinsxio/jx-build-controller:0.0.20
-  loadImage gcr.io/jenkinsxio/jx-git-operator:0.0.143
-  loadImage gcr.io/jenkinsxio/jx-pipelines-visualizer:0.0.61
-  loadImage gcr.io/jenkinsxio/jx-preview:0.0.137
-  loadImage gcr.io/jenkinsxio-labs/jxl:0.0.127
-  loadImage gcr.io/jenkinsxio/lighthouse-foghorn:0.0.0-SNAPSHOT-PR-1194-4
-  loadImage gcr.io/jenkinsxio/lighthouse-gc-jobs:0.0.0-SNAPSHOT-PR-1194-4
-  loadImage gcr.io/jenkinsxio/lighthouse-keeper:0.0.0-SNAPSHOT-PR-1194-4
-  loadImage gcr.io/jenkinsxio/lighthouse-tekton-controller:0.0.0-SNAPSHOT-PR-1194-4
-  loadImage gcr.io/jenkinsxio/lighthouse-webhooks:0.0.0-SNAPSHOT-PR-1194-4
-  loadImage gcr.io/tekton-releases/github.com/tektoncd/pipeline/cmd/git-init:v0.19.0
-  loadImage k8s.gcr.io/build-image/debian-base:v2.1.0
-  loadImage k8s.gcr.io/coredns:1.7.0
-  loadImage k8s.gcr.io/etcd:3.4.13-0
-  loadImage k8s.gcr.io/ingress-nginx/controller:v0.43.0
-  loadImage k8s.gcr.io/kube-apiserver:v1.19.1
-  loadImage k8s.gcr.io/kube-controller-manager:v1.19.1
-  loadImage k8s.gcr.io/kube-proxy:v1.19.1
-  loadImage k8s.gcr.io/kube-scheduler:v1.19.1
-  loadImage k8s.gcr.io/pause:3.3
-  loadImage quay.io/pusher/wave:v0.4.0
+dockerRegistryProxy() {
+  docker run --rm \
+    -e REGISTRIES="${DOCKER_REGISTRY_CACHE_REGISTRIES}" \
+    -e AUTH_REGISTRIES="${DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES}" \
+    -v "${DOCKER_REGISTRY_CACHE_FOLDER}/docker_mirror_cache":/docker_mirror_cache \
+    -v "${DOCKER_REGISTRY_CACHE_FOLDER}/docker_mirror_certs":/ca \
+    -p 3128:3128 \
+    --name docker-registry-proxy \
+    rpardini/docker-registry-proxy
 }
 
-generateLoadImages() {
-  docker ps | grep jx3 | while read id rest; do
-    docker exec $id crictl images;
-  done | tail -n +2 | grep -v "<none>" | while read repo tag rest; do
-    info loadImage $repo:$tag
-  done | sort -u
+buildKindNodeImage() {
+  folder=`mktemp -d`
+  pushd $folder
+  echo "${FILE_KIND_NODE_IMAGE_DOCKERFILE}" > Dockerfile
+  echo "${FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF}" > http-proxy.conf
+  docker build -t kind-jx3-node:latest .
+  popd
 }
-
 
 expectPodContainersReadyByLabel() {
   ns=${1}
@@ -416,7 +398,13 @@ expectPodContainersReadyByLabel() {
 
 loadImage() {
   substep "Loading image $1"
-  docker pull "$1"
+
+  if `docker inspect --type=image "$1" 2>&1 >/dev/null`; then
+    :
+  else
+    docker pull "$1"
+  fi
+  
   kind load docker-image --name=jx3 "$1"
 }
 
@@ -472,9 +460,8 @@ kind() {
 }
 
 
-helm_bin=''
+helm_bin=`which helm || true`
 installHelm() {
-  helm_bin=`which helm || true`
   if [ -x "${helm_bin}" ] ; then
     # helm in path
     :
@@ -510,7 +497,9 @@ help() {
 }
 
 destroy() {
-  rm log 2>&1 1>/dev/null || true
+  if [[ -f log ]]; then
+    rm log
+  fi
 
   set -euo pipefail
 
@@ -522,18 +511,25 @@ destroy() {
 
 }
 
-create() {
+createKindCluster() {
 
-  installKind
-  installYq
-  installHelm
 
   step "Creating kind cluster named jx3"
+
+  if [[ "${DOCKER_REGISTRY_PROXY}" == "true" ]]; then
+    substep "Build custom node image"
+    buildKindNodeImage
+  fi
 
   # create our own docker network so that we know the node's IP address ahead of time (easier than guessing the next avail IP on the kind network)
   networkId=`docker network create -d bridge --subnet "${SUBNET}" --gateway "${GATEWAY}" jx3`
   info "Node IP is ${IP}"
 
+
+  IMAGE=""
+  if [[ "${DOCKER_REGISTRY_PROXY}" == "true" ]]; then
+    IMAGE="kind-jx3-node:latest"
+  fi
 
   # https://kind.sigs.k8s.io/docs/user/local-registry/
   cat << EOF | env KIND_EXPERIMENTAL_DOCKER_NETWORK=jx3 kind create cluster --name jx3 --config=-
@@ -547,6 +543,7 @@ containerdConfigPatches:
     endpoint = ["http://docker-registry-jx.${IP}.nip.io:80"]
 nodes:
 - role: control-plane
+  image: $IMAGE
 EOF
 
   ## verify that the first node's IP address is what we have configured the registry mirror with
@@ -571,10 +568,9 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
 
-  if [[ "${PRELOAD_IMAGES}" == "true" ]]; then
-    loadImages
-  fi
+}
 
+configureHelm() {
   step "Configuring helm chart repositories"
 
   substep "ingress-nginx"
@@ -583,6 +579,9 @@ EOF
   helm repo add gitea-charts https://dl.gitea.io/charts/ 
   substep "helm repo update"
   helm repo update 
+}
+
+installNginxIngress() {
 
   step "Installing nginx ingress"
 
@@ -593,8 +592,10 @@ EOF
 
   expectPodContainersReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
 
-  step "Installing Gitea"
+}
 
+installGitea() {
+  step "Installing Gitea"
 
   kubectl create namespace gitea 
 
@@ -621,7 +622,10 @@ EOF
 
   info "Gitea is up at ${GIT_URL}"
   info "Login with username: gitea_admin password: ${GITEA_ADMIN_PASSWORD}"
-  
+}
+
+configureGiteaOrgAndUsers() {
+
   step "Creating ${DEVELOPER_USER} and ${BOT_USER} users"
 
   giteaCreateUserAndToken "${BOT_USER}" "${BOT_PASS}"
@@ -653,7 +657,17 @@ EOF
   curlTokenAuth "${developerToken}"
   response=`curl -s -X PUT "${GIT_URL}/api/v1/teams/${id}/members/${BOT_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}"`
 
-  step "Preparing jx3-cluster-repo"
+}
+
+loadGitUserTokens() {
+  botToken=`cat .bot.token`
+  developerToken=`cat .developer.token`
+}
+
+createClusterRepo() {
+  loadGitUserTokens
+
+  step "Create jx3-cluster-repo"
 
   json=`echo "${FILE_REPO_JSON}" | yq e '.name="jx3-cluster-repo"' - `
   # echo $json
@@ -808,12 +822,21 @@ EOF
   popd
   popd
 
+}
+
+installJx3GitOperator() {
+  loadGitUserTokens
+
   step "Installing jx3-git-operator"
   # https://jenkins-x.io/v3/admin/guides/operator/#insecure-git-repositories
   #  --setup "git config --global http.sslverify false"
   jx admin operator --batch-mode --url="${GIT_URL}/${ORG}/jx3-cluster-repo" --username "${BOT_USER}" --token "${botToken}"
 
   kubectl config set-context --current --namespace=jx
+}
+
+createNodeHttpDemoApp() {
+  loadGitUserTokens
 
   step "Create a demo app using the node-http quickstart"
 
@@ -826,28 +849,56 @@ EOF
   response=`curl -s -X PUT "${GIT_URL}/api/v1/repos/${ORG}/node-http/collaborators/${DEVELOPER_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"permission": "admin"}'`
   if [[ "$response" != "" ]]; then
     info "Failed adding ${DEVELOPER_USER} as a collaborator on node-http\n${response}"
+    exit 1
   fi
-
-  step "Update node-http demo and create PR"
-  info "TODO"
 
 }
 
+verifyNodeHttpDemoApp() {
+  step "Verify node-http demo"
+  info "TODO"
+}
 
-if [[ "$COMMAND" == "create" ]]; then
-  create
-elif [[ "$COMMAND" == "destroy" ]]; then
-  destroy
-elif [[ "$COMMAND" == "loadImages" ]]; then
-  loadImages
-elif [[ "$COMMAND" == "generateLoadImages" ]]; then
-  generateLoadImages
-elif [[ "$COMMAND" == "misc" ]]; then
-  :
-  # paste commands here to try in context of the vars and functions
+updateNodeHttpDemoApp() {
+  step "Update node-http demo and create PR"
+  info "TODO"
+}
 
-elif [[ "$COMMAND" == "help" ]]; then
-  help
+verifyUpdatedNodeHttpDemoApp() {
+  step "Verify updated node-http demo"
+  info "TODO"
+}
+
+create() {
+  installKind
+  installYq
+  installHelm
+  createKindCluster
+  configureHelm
+  installNginxIngress
+  installGitea
+  configureGiteaOrgAndUsers
+  createClusterRepo
+  installJx3GitOperator
+  createNodeHttpDemoApp
+  verifyNodeHttpDemoApp
+  updateNodeHttpDemoApp
+  verifyUpdatedNodeHttpDemoApp
+}
+function misc() {
+  echo "$FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF"
+}
+function_exists() {
+  declare -f -F $1 > /dev/null
+  return $?
+}
+
+if `function_exists "${COMMAND}"`; then
+  "${COMMAND}"
+  exit $?
+else
+  info "Unknown command : ${COMMAND}"
+  exit 1
 fi
 
 }
