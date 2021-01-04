@@ -1,0 +1,12 @@
+.history
+.developer.token
+.*.token
+kind
+gomplate
+helm
+log
+tea
+yq
+kind
+jx
+node-http
