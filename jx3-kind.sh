@@ -14,16 +14,19 @@ BOT_USER="jx3-bot"
 BOT_PASS="jx3-bot"
 SUBNET=${SUBNET:-"172.21.0.0/16"}
 GATEWAY=${GATEWAY:-"172.21.0.1"}
-
+JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
 LOG=${LOG:-"file"} #or console
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
 
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
-DOCKER_REGISTRY_CACHE_FOLDER=${DOCKER_REGISTRY_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-proxy"}
-DOCKER_REGISTRY_CACHE_REGISTRIES=${DOCKER_REGISTRY_CACHE_REGISTRIES:-"k8s.gcr.io gcr.io quay.io registry.opensource.zalan.do"}
-DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES=${DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES:-""}
-HOST_IP=${HOST_IP:-"192.168.0.101"}  # only needed when using DOCKER_REGISTRY_PROXY="true"
+DOCKER_REGISTRY_PROXY_HOST=${DOCKER_REGISTRY_PROXY_HOST:-"192.168.0.101"}
+DOCKER_REGISTRY_PROXY_PORT=${DOCKER_REGISTRY_PROXY_PORT:-"3128"}
+DOCKER_REGISTRY_PROXY_REGISTRIES=${DOCKER_REGISTRY_PROXY_REGISTRIES:-"k8s.gcr.io gcr.io quay.io registry.opensource.zalan.do"}
+DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES=${DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES:-""}
+
+DOCKER_REGISTRY_PROXY_CONTAINER_NAME=${DOCKER_REGISTRY_PROXY_CONTAINER_NAME:-"docker-registry-proxy"}
+DOCKER_REGISTRY_PROXY_CACHE_FOLDER=${DOCKER_REGISTRY_PROXY_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-proxy"}
 
 
 # thanks https://stackoverflow.com/questions/33056385/increment-ip-address-in-a-shell-script#43196141
@@ -115,15 +118,15 @@ EOF
 
 FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF=`cat <<EOF
 [Service]
-Environment="HTTP_PROXY=http://192.168.0.101:3128/"
-Environment="HTTPS_PROXY=http://192.168.0.101:3128/"
-Environment="NO_PROXY=localhost,docker-registry-jx.${IP}.nip.io"
+Environment="HTTP_PROXY=http://${DOCKER_REGISTRY_PROXY_HOST}:${DOCKER_REGISTRY_PROXY_PORT}/"
+Environment="HTTPS_PROXY=http://${DOCKER_REGISTRY_PROXY_HOST}:${DOCKER_REGISTRY_PROXY_PORT}/"
+Environment="NO_PROXY=localhost,docker-registry-jx.${IP}.nip.io,minio-jx.${IP}.nip.io"
 EOF
 `
 
-FILE_KIND_NODE_IMAGE_DOCKERFILE=`cat <<'EOF'
+FILE_KIND_NODE_IMAGE_DOCKERFILE=`cat <<EOF
 FROM kindest/node:v1.19.1
-ADD http://192.168.0.101:3128/ca.crt /usr/share/ca-certificates/docker_registry_proxy.crt
+ADD http://${DOCKER_REGISTRY_PROXY_HOST}:${DOCKER_REGISTRY_PROXY_PORT}/ca.crt /usr/share/ca-certificates/docker_registry_proxy.crt
 RUN echo "docker_registry_proxy.crt" >> /etc/ca-certificates.conf && \
     update-ca-certificates --fresh && \
     mkdir -p /etc/systemd/system/containerd.service.d/
@@ -370,14 +373,16 @@ EOF
 
 dockerRegistryProxy() {
   docker run --rm \
-    -e REGISTRIES="${DOCKER_REGISTRY_CACHE_REGISTRIES}" \
-    -e AUTH_REGISTRIES="${DOCKER_REGISTRY_CACHE_AUTH_REGISTRIES}" \
-    -v "${DOCKER_REGISTRY_CACHE_FOLDER}/docker_mirror_cache":/docker_mirror_cache \
-    -v "${DOCKER_REGISTRY_CACHE_FOLDER}/docker_mirror_certs":/ca \
-    -p 3128:3128 \
-    --name docker-registry-proxy \
+    -e REGISTRIES="${DOCKER_REGISTRY_PROXY_REGISTRIES}" \
+    -e AUTH_REGISTRIES="${DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES}" \
+    -e ENABLE_MANIFEST_CACHE="true" \
+    -v "${DOCKER_REGISTRY_PROXY_CACHE_FOLDER}/docker_mirror_cache":/docker_mirror_cache \
+    -v "${DOCKER_REGISTRY_PROXY_CACHE_FOLDER}/docker_mirror_certs":/ca \
+    -p "${DOCKER_REGISTRY_PROXY_PORT}:3128" \
+    --name ${DOCKER_REGISTRY_PROXY_CONTAINER_NAME} \
     rpardini/docker-registry-proxy
 }
+
 
 buildKindNodeImage() {
   folder=`mktemp -d`
@@ -497,17 +502,19 @@ help() {
 }
 
 destroy() {
+
   if [[ -f log ]]; then
     rm log
   fi
+  if [[ -d node-http ]]; then
+    rm -rf ./node-http
+  fi
+  rm -f .*.token || true
 
   set -euo pipefail
 
-
   kind delete cluster --name=jx3
-  id=`docker network rm jx3`
-  rm -f .*.token || true
-  rm -rf ./node-http || true
+  docker network rm jx3
 
 }
 
@@ -687,14 +694,15 @@ createClusterRepo() {
   git remote remove origin
   git remote add origin "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/jx3-cluster-repo"
 
-
-  substep "jx gitops upgrade"
-  jx gitops upgrade
-
+  if [[ "$JX_GITOPS_UPGRADE" == "true" ]]; then
+    substep "jx gitops upgrade"
+    jx gitops upgrade
+  fi
 
 
   substep "update OWNERS"
   echo "${FILE_OWNERS}" > OWNERS
+  git add .
   git commit -a -m 'feat: jx gitops upgrade and add OWNERS file'
 
 
