@@ -7,10 +7,11 @@ run `./jx3-kind.sh create` will create a single node kubernetes cluster with the
 
 * nginx ingress
 * gitea (hosting both the cluster repo and demo project)
-* minio (for bucketrepo storage)
+* minio - for bucketrepo (charts), docker-registry, logs (TODO) and reports (TODO) storage
 * vault
 * jenkins-x 3
 * node-http demo app
+* docker-registry-proxy (optional) pull through cache for docker images for speeding up provisioning the cluster
 
 
 run `./jx3-kind.sh destroy` will remove the cluster
