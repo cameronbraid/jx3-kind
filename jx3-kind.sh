@@ -390,21 +390,21 @@ startDockerRegistryProxy() {
     --name ${DOCKER_REGISTRY_PROXY_CONTAINER_NAME} \
     rpardini/docker-registry-proxy`
   info "docker-registry-proxy running with container id ${id}"
-}
 stopDockerRegistryProxy() {
   docker stop docker-registry-proxy
+}
 }
 
 
 
 buildKindNodeImage() {
-  folder=`mktemp -d`
-  pushd "${folder}"
+  tmp=`mktemp -d`
+  pushd "${tmp}"
   echo "${FILE_KIND_NODE_IMAGE_DOCKERFILE}" > Dockerfile
   echo "${FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF}" > http-proxy.conf
   docker build -t kind-jx3-node:latest .
   popd
-  info rm -rf "${folder}"
+  rm -rf "${tmp}"
 }
 
 expectPodContainersReadyByLabel() {
@@ -717,8 +717,8 @@ createClusterRepo() {
 
   substep "checkout from git"
 
-  repo=`mktemp -d`
-  pushd "$repo"
+  tmp=`mktemp -d`
+  pushd "${tmp}"
   # git clone https://github.com/cameronbraid/jx3-kind-vault
   git clone https://github.com/jx3-gitops-repositories/jx3-kind-vault
 
@@ -863,7 +863,7 @@ createClusterRepo() {
   popd
   popd
 
-  echo rm -rf "${repo}"
+  rm -rf "${tmp}"
 
 }
 
@@ -904,24 +904,39 @@ createNodeHttpDemoApp() {
 }
 
 
-waitForJxApplication() {
-  timeout=${1}
-  environment=${2}
-  name=${3}
-  version=${4}
+waitFor() {
+  timeout="$1"
+  shift
+  label="$1"
+  shift
+  command="$1"
+  shift
+  args="$@"
 
-  endtime=$(date -ud "$timeout" +%s)
-  substep "Waiting until `date -ud "$timeout"` for ${name} version ${version} in env ${environment} to be deployed"
+  endtime=$(date -ud "${timeout}" +%s)
+  substep "Waiting until `date -ud "${timeout}"` for: ${label}"
   while [[ $(date -u +%s) -le ${endtime} ]]
   do
-    count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | tail -n +2 | tr -s ' ' | cut -d ' ' -f 2 | grep "${version}" | wc -l  || true`
-    if [[ "${count}" == "1" ]]; then
+    if `${command} ${args[@]}`; then
       return 0
     fi
     sleep 5
   done
-  info "Application not found"
+  info "Gave up waiting for: ${label}"
   exit 1
+}
+
+isJxApplication() {
+  environment="$1"; shift
+  name="$1"; shift
+  version="$1"; shift
+
+  count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | tail -n +2 | tr -s ' ' | cut -d ' ' -f 2 | grep "${version}" | wc -l  || true`
+  if [[ "${count}" == "1" ]]; then
+    return 0
+  fi
+  return 1
+
 }
 
 APPLICATION_URL=""
@@ -940,27 +955,30 @@ getApplicationUrl() {
   fi
 }
 
-expectGetUrl() {
+getUrlResponseContains() {
   url=$1
   expectedText=$2
   curl -s "${url}" | grep "$expectedText" > /dev/null
 }
 
-verifyNodeHttpDemoApp() {
-  name="node-http"
-  environment="staging"
-  version="1.0.1"
-  step "Verify node-http demo is serving traffic"
-  substep "Wait for staging node-http ${version} to be released"
-  waitForJxApplication "10 minute" "${environment}" "${name}" "$version"
+assertNodeHttpDemoApp() {
+  environment="$1"; shift
+  name="$1"; shift
+  version="$1"; shift
+  expectedText="$1"; shift
+
+  step "Verify ${name} is deployed and serving traffic"
+
+  waitFor "10 minute" "${name} v${version} in ${environment}" isJxApplication "${environment}" "${name}" "${version}" "${expectedText}" || exit 1
+
   getApplicationUrl "${environment}" "${name}" "$version"
-  
-  if expectGetUrl "${APPLICATION_URL}" "Jenkins <strong>X</strong>"; then
-    substep "Application is up at ${APPLICATION_URL}"
-  else
-    substep "Appication NOT up at ${APPLICATION_URL}"
-    exit 1
-  fi
+
+  waitFor "2 minute" "${name} v${version} in ${environment} responds with ${expectedText}" getUrlResponseContains "${APPLICATION_URL}" "${expectedText}" || exit 1
+
+}
+
+verifyNodeHttpDemoApp() {
+  assertNodeHttpDemoApp "staging" "node-http" "1.0.1" "Jenkins <strong>X</strong>"
 }
 
 updateNodeHttpDemoApp() {
@@ -981,7 +999,6 @@ updateNodeHttpDemoApp() {
   git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/${project}"
 
   pushd "${project}"
-
 
   git checkout -b "${branch}"
   sed -i index.html -e 's|Jenkins <strong>X</strong>|Jenkins <strong>X3</strong>|'
@@ -1022,20 +1039,7 @@ EOF
 }
 
 verifyUpdatedNodeHttpDemoApp() {
-  name="node-http"
-  environment="staging"
-  version="1.0.2"
-  step "Verify node-http demo is serving traffic"
-  substep "Wait for staging node-http ${version} to be released"
-  waitForJxApplication "10 minute" "${environment}" "${name}" "${version}"
-  getApplicationUrl "${environment}" "${name}" "$version"
-  
-  if expectGetUrl "${APPLICATION_URL}" "Jenkins <strong>X3</strong>"; then
-    substep "Application is up at ${APPLICATION_URL}"
-  else
-    substep "Appication NOT up at ${APPLICATION_URL}"
-    exit 1
-  fi
+  assertNodeHttpDemoApp "staging" "node-http" "1.0.2" "Jenkins <strong>X3</strong>"
 }
 
 create() {
@@ -1050,11 +1054,20 @@ create() {
   createClusterRepo
   installJx3GitOperator
   waitForJxPodsToStart
+}
+
+testProjectGitops() {
   createNodeHttpDemoApp
   verifyNodeHttpDemoApp
   updateNodeHttpDemoApp
   verifyUpdatedNodeHttpDemoApp
 }
+
+ci() {
+  create
+  testProjectGitops
+}
+
 function misc() {
   echo "$FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF"
 }
