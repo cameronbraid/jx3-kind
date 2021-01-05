@@ -19,12 +19,20 @@ LOG=${LOG:-"file"} #or console
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
 
+
+# if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
+
+# the address of the docker-registry-proxy
+# when running the dockerRegistryProxy comand this is the IP of the docker host and the port on the host to forward to the container
 DOCKER_REGISTRY_PROXY_HOST=${DOCKER_REGISTRY_PROXY_HOST:-"192.168.0.101"}
 DOCKER_REGISTRY_PROXY_PORT=${DOCKER_REGISTRY_PROXY_PORT:-"3128"}
+
+# configuration for docker-registry-proxy
 DOCKER_REGISTRY_PROXY_REGISTRIES=${DOCKER_REGISTRY_PROXY_REGISTRIES:-"k8s.gcr.io gcr.io quay.io registry.opensource.zalan.do"}
 DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES=${DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES:-""}
 
+# when using command dockerRegistryProxy to start the proxy, the configures the container name and local storage folder for cache data
 DOCKER_REGISTRY_PROXY_CONTAINER_NAME=${DOCKER_REGISTRY_PROXY_CONTAINER_NAME:-"docker-registry-proxy"}
 DOCKER_REGISTRY_PROXY_CACHE_FOLDER=${DOCKER_REGISTRY_PROXY_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-proxy"}
 
@@ -386,11 +394,12 @@ dockerRegistryProxy() {
 
 buildKindNodeImage() {
   folder=`mktemp -d`
-  pushd $folder
+  pushd "${folder}"
   echo "${FILE_KIND_NODE_IMAGE_DOCKERFILE}" > Dockerfile
   echo "${FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF}" > http-proxy.conf
   docker build -t kind-jx3-node:latest .
   popd
+  info rm -rf "${folder}"
 }
 
 expectPodContainersReadyByLabel() {
@@ -400,6 +409,25 @@ expectPodContainersReadyByLabel() {
   substep "Waiting for pod $selector in namespace $ns to be ready"
   kubectl -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
 }
+
+# expectPodCount() {
+#   ns=${1}
+#   selector=${2}
+#   timeout=${3:-"5 minute"}
+#   count=${3:-"1"}
+
+#   endtime=$(date -ud "$runtime" +%s)
+
+#   while [[ $(date -u +%s) -le $endtime ]]
+#   do
+#     kubectl -n "${ns}" get pod --selector="${selector}" 
+
+#     substep "Waiting for ${count} pods in $ns $selector"
+
+#     sleep 5
+#   done
+  
+# }
 
 loadImage() {
   substep "Loading image $1"
@@ -672,6 +700,7 @@ loadGitUserTokens() {
 }
 
 createClusterRepo() {
+
   loadGitUserTokens
 
   step "Create jx3-cluster-repo"
@@ -684,7 +713,7 @@ createClusterRepo() {
   substep "checkout from git"
 
   repo=`mktemp -d`
-  pushd $repo
+  pushd "$repo"
   # git clone https://github.com/cameronbraid/jx3-kind-vault
   git clone https://github.com/jx3-gitops-repositories/jx3-kind-vault
 
@@ -693,7 +722,6 @@ createClusterRepo() {
   pushd jx3-kind-vault
   git remote remove origin
   git remote add origin "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/jx3-cluster-repo"
-
   if [[ "$JX_GITOPS_UPGRADE" == "true" ]]; then
     substep "jx gitops upgrade"
     jx gitops upgrade
@@ -830,6 +858,8 @@ createClusterRepo() {
   popd
   popd
 
+  echo rm -rf "${repo}"
+
 }
 
 installJx3GitOperator() {
@@ -842,6 +872,12 @@ installJx3GitOperator() {
 
   kubectl config set-context --current --namespace=jx
 }
+
+waitForJxPodsToStart() {
+  expectPodContainersReadyByLabel jx app=docker-registry
+  expectPodContainersReadyByLabel jx app=bucketrepo-bucketrepo
+  expectPodContainersReadyByLabel jx app=minio
+} 
 
 createNodeHttpDemoApp() {
   loadGitUserTokens
@@ -862,19 +898,119 @@ createNodeHttpDemoApp() {
 
 }
 
+
+waitForJxApplication() {
+  timeout=${1:-"10 minute"}
+  environment=${2}
+  name=${3}
+  version=${4}
+
+  endtime=$(date -ud "$timeout" +%s)
+  substep "Waiting until `date -ud "$timeout"` for ${name} version ${version} in env ${environment} to be deployed"
+  while [[ $(date -u +%s) -le ${endtime} ]]
+  do
+    count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true) | wc -l`
+    if [[ "${count}" == "1" ]]; then
+      return 0
+    fi
+  done
+  info "Application not found"
+  exit 1
+}
+
+APPLICATION_URL=""
+getApplicationUrl() {
+  environment=${1}
+  name=${2}
+  version=${3}
+
+  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true)`
+  # info "${table}"
+  if [[ `echo "$table" | wc -l` == "1" ]]; then
+    APPLICATION_URL=`echo "${table}" | tr -s ' ' | cut -d ' ' -f 4`
+  else
+    info "More than one application found"
+    exit 1
+  fi
+}
+
+expectGetUrl() {
+  url=$1
+  expectedText=$2
+  curl -s "${url}" | grep "$expectedText" > /dev/null
+}
+
 verifyNodeHttpDemoApp() {
-  step "Verify node-http demo"
-  info "TODO"
+  name="node-http"
+  environment="staging"
+  version="1.0.1"
+  step "Verify node-http demo is serving traffic"
+  substep "Wait for staging node-http ${version} to be released"
+  waitForJxApplication "10 minute" "${environment}" "${name}" "$version"
+  getApplicationUrl "${environment}" "${name}" "$version"
+  
+  if expectGetUrl "${APPLICATION_URL}" "Jenkins <strong>X</strong>"; then
+    substep "Application is up at ${APPLICATION_URL}"
+  else
+    substep "Appication NOT up at ${APPLICATION_URL}"
+    exit 1
+  fi
 }
 
 updateNodeHttpDemoApp() {
+  
   step "Update node-http demo and create PR"
-  info "TODO"
+  
+  loadGitUserTokens
+
+  substep "Clone node-http"
+
+  tmp=`mktemp -d`
+  pushd "${tmp}"
+
+  git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/node-http"
+
+  pushd node-http
+
+  branch="update-header-to-jenkins-3"
+  message="feat: update header to Jenkins X3"
+
+  git checkout -b "${branch}"
+  sed -i index.html -e 's|Jenkins <strong>X</strong>|Jenkins <strong>X3</strong>|'
+  git add index.html
+  git commit -m "${message}"
+  git push origin "${branch}"
+
+  popd
+  popd
+  echo rm -rf "${tmp}"
+
+  curlTokenAuth "${developerToken}"
+  pr=`cat <<EOF
+  {
+    "base": "master",
+    "body": "${message}",
+    "head": "${branch}",
+    "title": "${message}"
+  }
+EOF
+`
+  response=`echo "${pr}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/node-http/pulls" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
+  number=`echo "${response}" | yq eval '.number3' -`
+  if [[ "$number" == "null" ]]; then
+    info "Failed to create PR, response: ${response}"
+    exit 1
+  fi
+
+  info "PR created number ${number}"
+
 }
 
 verifyUpdatedNodeHttpDemoApp() {
+  version="1.0.2"
   step "Verify updated node-http demo"
-  info "TODO"
+  substep "Wait for staging node-http ${version} to be released"
+  waitForJxApplication "10 minute" "staging" "node-http" "${version}"
 }
 
 create() {
@@ -888,6 +1024,7 @@ create() {
   configureGiteaOrgAndUsers
   createClusterRepo
   installJx3GitOperator
+  waitForJxPodsToStart
   createNodeHttpDemoApp
   verifyNodeHttpDemoApp
   updateNodeHttpDemoApp
@@ -902,7 +1039,8 @@ function_exists() {
 }
 
 if `function_exists "${COMMAND}"`; then
-  "${COMMAND}"
+  shift
+  "${COMMAND}" "$@"
   exit $?
 else
   info "Unknown command : ${COMMAND}"
