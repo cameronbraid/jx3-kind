@@ -5,7 +5,5 @@ Install binaries
 ☐ kubectl
 
 ☐ wait for minio to start (pod ready)
-☐ wait for bucktrepo to start (pod ready)
-☐ wait for docker registry to start (pod ready)
 ☐ implement node-http update triggering new release
 ☐ implement node-http verifications

@@ -379,8 +379,8 @@ FILE_USER_JSON=`cat << 'EOF'
 EOF
 `
 
-dockerRegistryProxy() {
-  docker run --rm \
+startDockerRegistryProxy() {
+  id=`docker run -d --rm \
     -e REGISTRIES="${DOCKER_REGISTRY_PROXY_REGISTRIES}" \
     -e AUTH_REGISTRIES="${DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES}" \
     -e ENABLE_MANIFEST_CACHE="true" \
@@ -388,8 +388,13 @@ dockerRegistryProxy() {
     -v "${DOCKER_REGISTRY_PROXY_CACHE_FOLDER}/docker_mirror_certs":/ca \
     -p "${DOCKER_REGISTRY_PROXY_PORT}:3128" \
     --name ${DOCKER_REGISTRY_PROXY_CONTAINER_NAME} \
-    rpardini/docker-registry-proxy
+    rpardini/docker-registry-proxy`
+  info "docker-registry-proxy running with container id ${id}"
 }
+stopDockerRegistryProxy() {
+  docker stop docker-registry-proxy
+}
+
 
 
 buildKindNodeImage() {
@@ -900,7 +905,7 @@ createNodeHttpDemoApp() {
 
 
 waitForJxApplication() {
-  timeout=${1:-"10 minute"}
+  timeout=${1}
   environment=${2}
   name=${3}
   version=${4}
@@ -909,10 +914,11 @@ waitForJxApplication() {
   substep "Waiting until `date -ud "$timeout"` for ${name} version ${version} in env ${environment} to be deployed"
   while [[ $(date -u +%s) -le ${endtime} ]]
   do
-    count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true) | wc -l`
+    count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | tail -n +2 | tr -s ' ' | cut -d ' ' -f 2 | grep "${version}" | wc -l  || true`
     if [[ "${count}" == "1" ]]; then
       return 0
     fi
+    sleep 5
   done
   info "Application not found"
   exit 1
@@ -959,21 +965,23 @@ verifyNodeHttpDemoApp() {
 
 updateNodeHttpDemoApp() {
   
-  step "Update node-http demo and create PR"
+  project="node-http"
+  branch="update-header-to-jenkins-3"
+  message="feat: update header to Jenkins X3"
+
+  step "Update "${project}" demo and create PR"
   
   loadGitUserTokens
 
-  substep "Clone node-http"
+  substep "Clone ${project}"
 
   tmp=`mktemp -d`
   pushd "${tmp}"
 
-  git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/node-http"
+  git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/${project}"
 
-  pushd node-http
+  pushd "${project}"
 
-  branch="update-header-to-jenkins-3"
-  message="feat: update header to Jenkins X3"
 
   git checkout -b "${branch}"
   sed -i index.html -e 's|Jenkins <strong>X</strong>|Jenkins <strong>X3</strong>|'
@@ -983,7 +991,7 @@ updateNodeHttpDemoApp() {
 
   popd
   popd
-  echo rm -rf "${tmp}"
+  rm -rf "${tmp}"
 
   curlTokenAuth "${developerToken}"
   pr=`cat <<EOF
@@ -995,22 +1003,39 @@ updateNodeHttpDemoApp() {
   }
 EOF
 `
-  response=`echo "${pr}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/node-http/pulls" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
-  number=`echo "${response}" | yq eval '.number3' -`
+  response=`echo "${pr}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${project}/pulls" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
+  number=`echo "${response}" | yq eval '.number' -`
   if [[ "$number" == "null" ]]; then
     info "Failed to create PR, response: ${response}"
     exit 1
   fi
+  echo "PR response ${response}"
 
   info "PR created number ${number}"
 
+  substep "Add /approved comment to the pr so that it will automaticlaly merge"
+
+  request='{"body":"/approve"}'
+  response=`echo "${request}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${project}/issues/${number}/comments" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
+  # info "${response}"
+  # {"id":59,"html_url":"http://gitea.172.21.0.2.nip.io/coders/node-http/pulls/9#issuecomment-59","pull_request_url":"http://gitea.172.21.0.2.nip.io/coders/node-http/pulls/9","issue_url":"","user":{"id":3,"login":"developer","full_name":"developer","email":"developer@example.com","avatar_url":"http://gitea.172.21.0.2.nip.io/user/avatar/developer/-1","language":"en-US","is_admin":true,"last_login":"2021-01-05T09:16:36Z","created":"2021-01-04T15:10:30Z","username":"developer"},"original_author":"","original_author_id":0,"body":"/approve","created_at":"2021-01-05T10:17:13Z","updated_at":"2021-01-05T10:17:13Z"}
 }
 
 verifyUpdatedNodeHttpDemoApp() {
+  name="node-http"
+  environment="staging"
   version="1.0.2"
-  step "Verify updated node-http demo"
+  step "Verify node-http demo is serving traffic"
   substep "Wait for staging node-http ${version} to be released"
-  waitForJxApplication "10 minute" "staging" "node-http" "${version}"
+  waitForJxApplication "10 minute" "${environment}" "${name}" "${version}"
+  getApplicationUrl "${environment}" "${name}" "$version"
+  
+  if expectGetUrl "${APPLICATION_URL}" "Jenkins <strong>X3</strong>"; then
+    substep "Application is up at ${APPLICATION_URL}"
+  else
+    substep "Appication NOT up at ${APPLICATION_URL}"
+    exit 1
+  fi
 }
 
 create() {
