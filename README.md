@@ -43,5 +43,5 @@ run `./jx3-kind.sh destroy` will remove the cluster
 ## Why ?
 
 * To identify (and assist in fixing) bugs in jx3 related to gitea
-* To force me to gain a deeper understanding of jx3
+* To enable me to gain a deeper understanding of jx3 both how it works and how it is configured
 * To provide a CI test for jx3
