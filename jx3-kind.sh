@@ -7,11 +7,11 @@ COMMAND=${1:-'help'}
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-ORG="coders"
-DEVELOPER_USER="developer"
-DEVELOPER_PASS="developer"
-BOT_USER="jx3-bot"
-BOT_PASS="jx3-bot"
+ORG="${ORG:-coders}"
+DEVELOPER_USER="${DEVELOPER_USER:-developer}"
+DEVELOPER_PASS="${DEVELOPER_PASS:-developer}"
+BOT_USER="${BOT_USER:-jx3-bot}"
+BOT_PASS="${BOT_PASS:-jx3-bot}"
 SUBNET=${SUBNET:-"172.21.0.0/16"}
 GATEWAY=${GATEWAY:-"172.21.0.1"}
 JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
