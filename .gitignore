@@ -10,3 +10,4 @@ yq
 kind
 jx
 node-http
+.ci*

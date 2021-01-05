@@ -414,7 +414,7 @@ isPodReady() {
   kubectl wait --for="condition=ready" -n "${ns}" pod --selector="${selector}" --timeout="10s"
 }
 
-expectPodContainersReadyByLabel() {
+expectPodsReadyByLabel() {
 
   ns="${1}"
   selector="${2}"
@@ -644,7 +644,7 @@ installNginxIngress() {
 
   substep "Waiting for nginx to start"
 
-  expectPodContainersReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
+  expectPodsReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
 
 }
 
@@ -657,7 +657,7 @@ installGitea() {
 
   substep "Waiting for Gitea to start"
 
-  expectPodContainersReadyByLabel gitea app.kubernetes.io/name=gitea
+  expectPodsReadyByLabel gitea app.kubernetes.io/name=gitea
 
 
   # Verify that gitea is serving
@@ -893,9 +893,9 @@ installJx3GitOperator() {
 }
 
 waitForJxPodsToStart() {
-  expectPodContainersReadyByLabel jx app=docker-registry
-  expectPodContainersReadyByLabel jx app=bucketrepo-bucketrepo
-  expectPodContainersReadyByLabel jx app=minio
+  expectPodsReadyByLabel jx app=docker-registry
+  expectPodsReadyByLabel jx app=bucketrepo-bucketrepo
+  expectPodsReadyByLabel jx app=minio
 } 
 
 createNodeHttpDemoApp() {
@@ -1081,7 +1081,20 @@ ci() {
 }
 
 function misc() {
-  expectPodContainersReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
+  expectPodsReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
+}
+
+function ciLoop() {
+  if [ -x ".ci-loop" ]; then
+    rm .ci-loop
+  fi
+  i=0
+  while true; do
+    ((i = i+1))
+    echo "`date` ci run $i" >> .ci-loop
+    info "CI RUN ${i}"
+    ci
+  done
 }
 
 function_exists() {
