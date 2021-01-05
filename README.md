@@ -28,5 +28,5 @@ run `./jx3-kind.sh destroy` will remove the cluster
 
 ## docker-registry-proxy
 
-* run `DOCKER_REGISTRY_PROXY_HOST=XXX ./jx3-kind.sh startDockerRegistryProxy` will run a local docker-registry-proxy container - replace XXX with your host ip (see other config options at the top of jx3-kind.sh)
-* run `DOCKER_REGISTRY_PROXY_HOST=XXX DOCKER_REGISTRY_PROXY=true ./jx3-kind.sh ci` to run the `ci` using the local proxy
+* `DOCKER_REGISTRY_PROXY_HOST=XXX ./jx3-kind.sh startDockerRegistryProxy` will run a local docker-registry-proxy container - replace XXX with your host ip (see other config options at the top of jx3-kind.sh)
+* `DOCKER_REGISTRY_PROXY_HOST=XXX DOCKER_REGISTRY_PROXY=true ./jx3-kind.sh ci` to run the `ci` using the local proxy
