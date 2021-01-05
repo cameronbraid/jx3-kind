@@ -544,6 +544,7 @@ yq() {
 }
 
 help() {
+  # TODO
   info "run 'jx3-kind.sh create' or 'jx3-kind.sh destroy'"
 }
 
