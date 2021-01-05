@@ -407,12 +407,25 @@ buildKindNodeImage() {
   rm -rf "${tmp}"
 }
 
+isPodReady() {
+  ns="${1}"
+  selector="${2}"
+
+  kubectl wait --for="condition=ready" -n "${ns}" pod --selector="${selector}" --timeout="10s"
+}
+
 expectPodContainersReadyByLabel() {
-  ns=${1}
-  selector=${2}
-  timeout=${3:-"10m"}
-  substep "Waiting for pod $selector in namespace $ns to be ready"
-  kubectl -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
+
+  ns="${1}"
+  selector="${2}"
+
+  # using a single wait like the following can be flakey - ive seen cases where the pod is ready (verified by running the same command in a separate terminal while this one is still pending)
+  # {my suspicion is that the wait command evaluates the selector once, then wathces that pod by name.  So if the pod is deleted and another is created, it will timeout with a failure}
+#  kubectl -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
+  
+  # conceptually we want to wait for any pod that matches the selector, so doing it this way re-runs the selector each 'waitFor' loop
+  waitFor "10 minute" "$ns : $selector to be ready" isPodReady "${ns}" "${selector}" || exit 1
+
 }
 
 # expectPodCount() {
@@ -905,19 +918,17 @@ createNodeHttpDemoApp() {
 
 
 waitFor() {
-  timeout="$1"
-  shift
-  label="$1"
-  shift
-  command="$1"
-  shift
+  timeout="$1"; shift
+  label="$1"; shift
+  command="$1"; shift
   args="$@"
 
   endtime=$(date -ud "${timeout}" +%s)
-  substep "Waiting until `date -ud "${timeout}"` for: ${label}"
+  substep "Waiting up to ${timeout} for: ${label}"
   while [[ $(date -u +%s) -le ${endtime} ]]
   do
-    if `${command} ${args[@]}`; then
+    ${command} ${args[@]} 2>&1 >/dev/null && RC=$? || RC=$?
+    if [[ $RC -eq 0 ]]; then
       return 0
     fi
     sleep 5
@@ -969,11 +980,11 @@ assertNodeHttpDemoApp() {
 
   step "Verify ${name} is deployed and serving traffic"
 
-  waitFor "10 minute" "${name} v${version} in ${environment}" isJxApplication "${environment}" "${name}" "${version}" "${expectedText}" || exit 1
+  waitFor "10 minute" "${name} v${version} in ${environment}" isJxApplication "${environment}" "${name}" "${version}"
 
   getApplicationUrl "${environment}" "${name}" "$version"
 
-  waitFor "2 minute" "${name} v${version} in ${environment} responds with ${expectedText}" getUrlResponseContains "${APPLICATION_URL}" "${expectedText}" || exit 1
+  waitFor "5 minute" "${APPLICATION_URL} responds with ${expectedText}" getUrlResponseContains "${APPLICATION_URL}" "${expectedText}"
 
 }
 
@@ -1069,8 +1080,9 @@ ci() {
 }
 
 function misc() {
-  echo "$FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF"
+  expectPodContainersReadyByLabel nginx app.kubernetes.io/name=ingress-nginx
 }
+
 function_exists() {
   declare -f -F $1 > /dev/null
   return $?
