@@ -23,6 +23,7 @@ LOG_FILE=${LOG_FILE:-"log"} #or console
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
 KUBEAPPLY=${KUBEAPPLY:-""}
+KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -765,10 +766,13 @@ createClusterRepo() {
 
   if [[ "${KUBEAPPLY}" != "" ]]; then
     sed -e 's/^KUBEAPPLY .*$/KUBEAPPLY \?\= '${KUBEAPPLY}'/g' -i versionStream/src/Makefile.mk
+  fi
+
+  if [[ "${KAPP_DEPLOY_WAIT}" == "false" ]]; then
     sed -e 's/kapp deploy/kapp deploy --wait=false/g' -i versionStream/src/Makefile.mk
   fi
 
-
+  
   substep "update OWNERS"
   echo "${FILE_OWNERS}" > OWNERS
   git add .
