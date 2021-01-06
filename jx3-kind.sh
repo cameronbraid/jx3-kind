@@ -765,7 +765,7 @@ createClusterRepo() {
 
   if [[ "${KUBEAPPLY}" != "" ]]; then
     sed -e 's/^KUBEAPPLY .*$/KUBEAPPLY \?\= '${KUBEAPPLY}'/g' -i versionStream/src/Makefile.mk
-    # sed -e 's/kapp deploy/kapp deploy --wait=false/g' -i versionStream/src/Makefile.mk
+    sed -e 's/kapp deploy/kapp deploy --wait=false/g' -i versionStream/src/Makefile.mk
   fi
 
 
