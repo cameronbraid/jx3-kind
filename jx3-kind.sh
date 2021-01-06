@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # https://stackoverflow.com/questions/2336977/can-a-shell-script-indicate-that-its-lines-be-loaded-into-memory-initially
 {
-set -euo pipefail 
+set -euo pipefail
 
 COMMAND=${1:-'help'}
 
@@ -14,11 +14,15 @@ BOT_USER="${BOT_USER:-jx3-bot}"
 BOT_PASS="${BOT_PASS:-jx3-bot}"
 SUBNET=${SUBNET:-"172.21.0.0/16"}
 GATEWAY=${GATEWAY:-"172.21.0.1"}
+NAME=${NAME:-"jx3"}
+DOCKER_NETWORK_NAME=${DOCKER_NETWORK_NAME:-"${NAME}"}
+KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-"${NAME}"}
 JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
 LOG=${LOG:-"file"} #or console
+LOG_FILE=${LOG_FILE:-"log"} #or console
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
-
+KUBEAPPLY=${KUBEAPPLY:-""}
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -36,6 +40,10 @@ DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES=${DOCKER_REGISTRY_PROXY_AUTH_REGISTRIES:-"
 DOCKER_REGISTRY_PROXY_CONTAINER_NAME=${DOCKER_REGISTRY_PROXY_CONTAINER_NAME:-"docker-registry-proxy"}
 DOCKER_REGISTRY_PROXY_CACHE_FOLDER=${DOCKER_REGISTRY_PROXY_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-proxy"}
 
+DOCKER_REGISTRY_PULL_THROUGH_CACHE=${DOCKER_REGISTRY_PULL_THROUGH_CACHE:-"false"}
+DOCKER_REGISTRY_PULL_THROUGH_CACHE_HOST=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_HOST:-"192.168.0.101"}
+DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT:-"5000"}
+DOCKER_REGISTRY_PULL_THROUGH_CACHE_FOLDER=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-pull-through-cache"}
 
 # thanks https://stackoverflow.com/questions/33056385/increment-ip-address-in-a-shell-script#43196141
 nextip(){
@@ -67,26 +75,29 @@ CURL_GIT_ADMIN_AUTH=("${CURL_AUTH[@]}")
 declare -a CURL_TYPE_JSON=("-H" "Accept: application/json" "-H" "Content-Type: application/json")
 # "${GIT_SCHEME}://gitea_admin:${GITEA_ADMIN_PASSWORD}@${GIT_HOST}"
 
-if [[ "${LOG}" == "file" && "${COMMAND}" != "env" ]]; then
-  # https://unix.stackexchange.com/questions/462156/how-do-i-find-the-line-number-in-bash-when-an-error-occured#462157
-  # redirect 4 to stderr and 3 to stdout 
-  exec 3>&1 4>&2
-  # restore file desciptors
-  trap 'exec 2>&4 1>&3; err' 1 2 3
-  trap 'exec 2>&4 1>&3;' 0
-  # redirect original stdout to log file
-  exec 1>log
-else
-  trap 'err' ERR
-fi
+initLog() {
+  if [[ "${LOG}" == "file" ]]; then
+    # https://unix.stackexchange.com/questions/462156/how-do-i-find-the-line-number-in-bash-when-an-error-occured#462157
+    # redirect 4 to stderr and 3 to stdout 
+    exec 3>&1 4>&2
+    # restore file desciptors afterwards
+    trap 'exec 2>&4 1>&3; err;' 1 2 3
+    trap 'exec 2>&4 1>&3;' 0
+    # redirect original stdout to log file
+    exec 1> "${LOG_FILE}"
+  else
+    trap 'err' ERR
+  fi
+}
 
 # write message to console and log
 info() {
+  date=$(date '+%Y-%m-%d %H:%M:%S')
   if [[ "${LOG}" == "file" ]]; then
-    echo -e "$@" >&3
-    echo -e "$@"
+    echo -e "${date} $@" >&3
+    echo -e "${date} $@"
   else
-    echo -e "$@"
+    echo -e "${date} $@"
   fi
 }
 
@@ -108,11 +119,14 @@ substep() {
 err() {
   if [[ "$STEP" == "" ]]; then
       echo "Failed running: ${BASH_COMMAND}"
+      exit 1
   else
     if [[ "$SUB_STEP" != "" ]]; then
       echo "Failed at [$STEP / $SUB_STEP] running : ${BASH_COMMAND}"
+      exit 1
     else
       echo "Failed at [$STEP] running : ${BASH_COMMAND}"
+      exit 1
     fi
   fi
 }
@@ -286,6 +300,12 @@ replicaCount: 1
 EOF
 `
 
+FILE_JXBOOT_HELMFILE_RESOURCES_VALUES_YAML=`cat << EOF
+  kaniko:
+    flags: --insecure --registry-mirror=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_HOST}:${DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT}
+EOF
+`
+
 FILE_NGINX_VALUES=`cat << EOF
 controller:
   hostPort:
@@ -379,6 +399,20 @@ FILE_USER_JSON=`cat << 'EOF'
 EOF
 `
 
+startDockerRegistryPullThroughCache() {
+  id=`docker run -d --rm \
+    -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io \
+    -v "${DOCKER_REGISTRY_PULL_THROUGH_CACHE_FOLDER}":/var/lib/registry \
+    -p ${DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT}:5000 \
+    --name docker-registry-pull-through-cache \
+    registry:2
+  ` 
+  info "docker-registry-pull-through-cache running with container id ${id}"
+
+}
+stopDockerRegistryPullThroughCache() {
+    docker stop docker-registry-pull-through-cache
+}
 startDockerRegistryProxy() {
   id=`docker run -d --rm \
     -e REGISTRIES="${DOCKER_REGISTRY_PROXY_REGISTRIES}" \
@@ -390,6 +424,7 @@ startDockerRegistryProxy() {
     --name ${DOCKER_REGISTRY_PROXY_CONTAINER_NAME} \
     rpardini/docker-registry-proxy`
   info "docker-registry-proxy running with container id ${id}"
+
 stopDockerRegistryProxy() {
   docker stop docker-registry-proxy
 }
@@ -399,11 +434,11 @@ stopDockerRegistryProxy() {
 
 buildKindNodeImage() {
   tmp=`mktemp -d`
-  pushd "${tmp}"
+  pushd "${tmp}" >/dev/null
   echo "${FILE_KIND_NODE_IMAGE_DOCKERFILE}" > Dockerfile
   echo "${FILE_KIND_NODE_IMAGE_HTTP_PROXY_CONF}" > http-proxy.conf
   docker build -t kind-jx3-node:latest .
-  popd
+  popd >/dev/null
   rm -rf "${tmp}"
 }
 
@@ -411,7 +446,7 @@ isPodReady() {
   ns="${1}"
   selector="${2}"
 
-  kubectl wait --for="condition=ready" -n "${ns}" pod --selector="${selector}" --timeout="10s"
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" wait --for="condition=ready" -n "${ns}" pod --selector="${selector}" --timeout="10s"
 }
 
 expectPodsReadyByLabel() {
@@ -421,10 +456,10 @@ expectPodsReadyByLabel() {
 
   # using a single wait like the following can be flakey - ive seen cases where the pod is ready (verified by running the same command in a separate terminal while this one is still pending)
   # {my suspicion is that the wait command evaluates the selector once, then wathces that pod by name.  So if the pod is deleted and another is created, it will timeout with a failure}
-#  kubectl -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
+#  kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
   
   # conceptually we want to wait for any pod that matches the selector, so doing it this way re-runs the selector each 'waitFor' loop
-  waitFor "10 minute" "$ns : $selector to be ready" isPodReady "${ns}" "${selector}" || exit 1
+  waitFor "10 minute" "$ns : $selector to be ready" isPodReady "${ns}" "${selector}"
 
 }
 
@@ -438,7 +473,7 @@ expectPodsReadyByLabel() {
 
 #   while [[ $(date -u +%s) -le $endtime ]]
 #   do
-#     kubectl -n "${ns}" get pod --selector="${selector}" 
+#     kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "${ns}" get pod --selector="${selector}" 
 
 #     substep "Waiting for ${count} pods in $ns $selector"
 
@@ -446,19 +481,6 @@ expectPodsReadyByLabel() {
 #   done
   
 # }
-
-loadImage() {
-  substep "Loading image $1"
-
-  if `docker inspect --type=image "$1" 2>&1 >/dev/null`; then
-    :
-  else
-    docker pull "$1"
-  fi
-  
-  kind load docker-image --name=jx3 "$1"
-}
-
 
 TOKEN=""
 giteaCreateUserAndToken() {
@@ -488,7 +510,7 @@ giteaCreateUserAndToken() {
   token=`echo "${response}" | yq eval '.sha1' -`
   if [[ "$token" == "null" ]]; then
     info "Failed to create token for ${username}, json response: \n${response}"
-    exit 1
+    return 1
   fi
   TOKEN="${token}"
 }
@@ -496,7 +518,6 @@ giteaCreateUserAndToken() {
 
 kind_bin="${DIR}/kind"
 installKind() {
-
   if [ -x "${kind_bin}" ] ; then
     # kind in current dir
     :
@@ -550,33 +571,31 @@ help() {
 
 destroy() {
 
-  if [[ -f log ]]; then
-    rm log
+  if [[ -f "${LOG_FILE}" ]]; then
+    rm "${LOG_FILE}"
   fi
   if [[ -d node-http ]]; then
     rm -rf ./node-http
   fi
   rm -f .*.token || true
 
-  set -euo pipefail
-
-  kind delete cluster --name=jx3
-  docker network rm jx3
+  kind delete cluster --name="${KIND_CLUSTER_NAME}"
+  docker network rm "${DOCKER_NETWORK_NAME}"
 
 }
 
 createKindCluster() {
 
 
-  step "Creating kind cluster named jx3"
+  step "Creating kind cluster named ${KIND_CLUSTER_NAME}"
 
   if [[ "${DOCKER_REGISTRY_PROXY}" == "true" ]]; then
     substep "Build custom node image"
     buildKindNodeImage
   fi
-
   # create our own docker network so that we know the node's IP address ahead of time (easier than guessing the next avail IP on the kind network)
-  networkId=`docker network create -d bridge --subnet "${SUBNET}" --gateway "${GATEWAY}" jx3`
+  networkId=`docker network create -d bridge --subnet "${SUBNET}" --gateway "${GATEWAY}" "${DOCKER_NETWORK_NAME}"`
+
   info "Node IP is ${IP}"
 
 
@@ -586,7 +605,7 @@ createKindCluster() {
   fi
 
   # https://kind.sigs.k8s.io/docs/user/local-registry/
-  cat << EOF | env KIND_EXPERIMENTAL_DOCKER_NETWORK=jx3 kind create cluster --name jx3 --config=-
+  cat << EOF | env KIND_EXPERIMENTAL_DOCKER_NETWORK="${DOCKER_NETWORK_NAME}" kind create cluster --name "${KIND_CLUSTER_NAME}" --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 containerdConfigPatches:
@@ -601,16 +620,16 @@ nodes:
 EOF
 
   ## verify that the first node's IP address is what we have configured the registry mirror with
-  internalIp=`kubectl get node -o jsonpath="{.items[0]..status.addresses[?(@.type == 'InternalIP')].address}"`
+  internalIp=`kubectl --context "kind-${KIND_CLUSTER_NAME}" get node -o jsonpath="{.items[0]..status.addresses[?(@.type == 'InternalIP')].address}"`
   if [[ "${IP}" != "${internalIp}" ]]; then
     info "First node's internalIp '${internalIp}' is not what was expected '${IP}'"
-    exit 1
+    return 1
   fi
 
   # Document the local registry
   # https://github.com/kubernetes/enhancements/tree/master/keps/sig-cluster-lifecycle/generic/1755-communicating-a-local-registry
 
-  cat <<EOF | kubectl apply -f -
+  cat <<EOF | kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -628,19 +647,19 @@ configureHelm() {
   step "Configuring helm chart repositories"
 
   substep "ingress-nginx"
-  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
   substep "gitea-charts"
-  helm repo add gitea-charts https://dl.gitea.io/charts/ 
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo add gitea-charts https://dl.gitea.io/charts/ 
   substep "helm repo update"
-  helm repo update 
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo update 
 }
 
 installNginxIngress() {
 
   step "Installing nginx ingress"
 
-  kubectl create namespace nginx 
-  echo "${FILE_NGINX_VALUES}" | helm install nginx --namespace nginx --values - ingress-nginx/ingress-nginx 
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" create namespace nginx 
+  echo "${FILE_NGINX_VALUES}" | helm --kube-context "kind-${KIND_CLUSTER_NAME}"  install nginx --namespace nginx --values - ingress-nginx/ingress-nginx 
 
   substep "Waiting for nginx to start"
 
@@ -651,9 +670,9 @@ installNginxIngress() {
 installGitea() {
   step "Installing Gitea"
 
-  kubectl create namespace gitea 
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" create namespace gitea 
 
-  echo "${FILE_GITEA_VALUES_YAML}" | helm install --namespace gitea -f - gitea gitea-charts/gitea 
+  echo "${FILE_GITEA_VALUES_YAML}" | helm --kube-context "kind-${KIND_CLUSTER_NAME}"  install --namespace gitea -f - gitea gitea-charts/gitea 
 
   substep "Waiting for Gitea to start"
 
@@ -671,7 +690,7 @@ installGitea() {
 
   if [[ "${http_code}" != "200" ]]; then
     info "Gitea didn't startup"
-    exit 1
+    return 1
   fi
 
   info "Gitea is up at ${GIT_URL}"
@@ -685,7 +704,6 @@ configureGiteaOrgAndUsers() {
   giteaCreateUserAndToken "${BOT_USER}" "${BOT_PASS}"
   botToken="${TOKEN}"
   echo "${botToken}" > ${DIR}/.bot.token
-  info "botToken = /${botToken}/"
 
   giteaCreateUserAndToken "${DEVELOPER_USER}" "${DEVELOPER_PASS}"
   developerToken="${TOKEN}"
@@ -694,7 +712,7 @@ configureGiteaOrgAndUsers() {
 
   curlTokenAuth "${developerToken}"
   json=`curl -s -X POST "${GIT_URL}/api/v1/orgs" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"repo_admin_change_team_access": true, "username": "'${ORG}'", "visibility": "private"}'`
-  info "$json"
+  info "${json}"
 
   step "Add ${BOT_USER} an owner of ${ORG} organisation"
 
@@ -704,7 +722,7 @@ configureGiteaOrgAndUsers() {
   id=`echo "${json}" | yq eval '.data[0].id' -`
   if [[ "${id}" == "null" ]]; then
     info "Unable to find owners team, json response :\n${json}"
-    exit 1
+    return 1
   fi
 
   substep "add ${BOT_USER} as member of owners team (#${id}) for ${ORG}"
@@ -736,7 +754,6 @@ createClusterRepo() {
   # git clone https://github.com/cameronbraid/jx3-kind-vault
   git clone https://github.com/jx3-gitops-repositories/jx3-kind-vault
 
-
   substep "change remote to point to gitea"
   pushd jx3-kind-vault
   git remote remove origin
@@ -744,6 +761,11 @@ createClusterRepo() {
   if [[ "$JX_GITOPS_UPGRADE" == "true" ]]; then
     substep "jx gitops upgrade"
     jx gitops upgrade
+  fi
+
+  if [[ "${KUBEAPPLY}" != "" ]]; then
+    sed -e 's/^KUBEAPPLY .*$/KUBEAPPLY \?\= '${KUBEAPPLY}'/g' -i versionStream/src/Makefile.mk
+    # sed -e 's/kapp deploy/kapp deploy --wait=false/g' -i versionStream/src/Makefile.mk
   fi
 
 
@@ -768,6 +790,9 @@ createClusterRepo() {
   yq eval 'del( .helmfiles.[] | select(.path == "helmfiles/nginx/helmfile.yaml") )' -i ./helmfile.yaml
   rm -rf helmfiles/nginx
 
+  substep "remove jx3/local-external-secrets release"
+  yq eval 'del( .releases.[] | select(.name == "local-external-secrets") )' -i helmfiles/jx/helmfile.yaml
+
   substep "add secret-infra helmfile"
   mkdir helmfiles/secret-infra -p
   
@@ -780,6 +805,25 @@ createClusterRepo() {
 
 
   substep "configure ligthhouse"
+
+  echo "${FILE_JX_LIGTHHOUSE_VALUES_YAML}" > helmfiles/jx/jx-ligthhouse-values.yaml
+  yq eval '(.releases.[] | select(.name == "lighthouse")).values += "jx-ligthhouse-values.yaml"' -i helmfiles/jx/helmfile.yaml
+  yq eval '(.releases.[] | select(.name == "lighthouse")).version = "'${LIGHTHOUSE_VERSION}'"' -i helmfiles/jx/helmfile.yaml
+  yq eval '.version = "'${LIGHTHOUSE_VERSION}'"' -i versionStream/charts/jenkins-x/lighthouse/defaults.yaml
+
+  # # newer lighthouse enforces that trigger is a pattern and that rerun_command MUST match it
+  # yq eval '(.spec.presubmits.[] | select(.name == "verify")).trigger = "(?m)^\/(re)?test"' -i .lighthouse/jenkins-x/triggers.yaml
+
+  git add .
+  git commit -a -m 'feat: patch lighthouse config'
+
+
+  ## DOCKER_REGISTRY_PULL_THROUGH_CACHE
+  if [[ "${DOCKER_REGISTRY_PULL_THROUGH_CACHE}" == "true" ]]; then
+    substep "configure docker registry pull through cache"
+    yq eval '(.releases.[] | select(.name == "jxboot-helmfile-resources")).values += "jxboot-helmfile-resources-values.yaml"' -i helmfiles/jx/helmfile.yaml
+    echo "${FILE_JXBOOT_HELMFILE_RESOURCES_VALUES_YAML}" > helmfiles/jx/jxboot-helmfile-resources-values.yaml
+  fi
 
   echo "${FILE_JX_LIGTHHOUSE_VALUES_YAML}" > helmfiles/jx/jx-ligthhouse-values.yaml
   yq eval '(.releases.[] | select(.name == "lighthouse")).values += "jx-ligthhouse-values.yaml"' -i helmfiles/jx/helmfile.yaml
@@ -889,14 +933,33 @@ installJx3GitOperator() {
   #  --setup "git config --global http.sslverify false"
   jx admin operator --batch-mode --url="${GIT_URL}/${ORG}/jx3-cluster-repo" --username "${BOT_USER}" --token "${botToken}"
 
-  kubectl config set-context --current --namespace=jx
+  kubectl --context kind-${KIND_CLUSTER_NAME} config set-context --current --namespace=jx
 }
 
-waitForJxPodsToStart() {
+waitForJxToStart() {
   expectPodsReadyByLabel jx app=docker-registry
   expectPodsReadyByLabel jx app=bucketrepo-bucketrepo
   expectPodsReadyByLabel jx app=minio
+
+
+# correction on below - the secret is created during the first jx-boot run.. so the jx-boot may have failed that time
+  # there is a race somewhere leading to the first verify pipeline to fail:
+  # ❯ tkn pipelinerun list
+  # NAME           STARTED         DURATION    STATUS
+  # verify-9nv7k   9 seconds ago   2 seconds   Failed
+  # ❯ tkn pipelinerun logs -f
+  # task from-build-pack has failed: failed to create task run pod "verify-9nv7k-from-build-pack-lmf9q": translating TaskSpec to Pod: secrets "tekton-container-registry-auth" not found. Maybe invalid TaskSpec
+  # pod for taskrun verify-9nv7k-from-build-pack-lmf9q not available yet
+  # Tasks Completed: 1 (Failed: 1, Cancelled 0), Skipped: 0
+  waitFor "5 minutes" "jx tekton-container-registry-auth secret" expectSecretToExist "jx" "tekton-container-registry-auth"
+
 } 
+
+expectSecretToExist() {
+  ns="$1"; shift
+  name="$1"; shift
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "${ns}" get secret "${name}" 2>&1 >/dev/null
+}
 
 createNodeHttpDemoApp() {
   loadGitUserTokens
@@ -912,7 +975,7 @@ createNodeHttpDemoApp() {
   response=`curl -s -X PUT "${GIT_URL}/api/v1/repos/${ORG}/node-http/collaborators/${DEVELOPER_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"permission": "admin"}'`
   if [[ "$response" != "" ]]; then
     info "Failed adding ${DEVELOPER_USER} as a collaborator on node-http\n${response}"
-    exit 1
+    return 1
   fi
 
 }
@@ -922,20 +985,20 @@ waitFor() {
   timeout="$1"; shift
   label="$1"; shift
   command="$1"; shift
-  args="$@"
+  args=("$@")
 
   endtime=$(date -ud "${timeout}" +%s)
   substep "Waiting up to ${timeout} for: ${label}"
   while [[ $(date -u +%s) -le ${endtime} ]]
   do
-    ${command} ${args[@]} 2>&1 >/dev/null && RC=$? || RC=$?
+    "${command}" "${args[@]}" 2>&1 >/dev/null && RC=$? || RC=$?
     if [[ $RC -eq 0 ]]; then
       return 0
     fi
     sleep 5
   done
   info "Gave up waiting for: ${label}"
-  exit 1
+  return 1
 }
 
 isJxApplication() {
@@ -953,24 +1016,24 @@ isJxApplication() {
 
 APPLICATION_URL=""
 getApplicationUrl() {
-  environment=${1}
-  name=${2}
-  version=${3}
+  environment=${1}; shift
+  name=${1}; shift
+  version=${1}; shift
 
-  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true)`
+  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true) | tr -s ' '`
   # info "${table}"
-  if [[ `echo "$table" | wc -l` == "1" ]]; then
-    APPLICATION_URL=`echo "${table}" | tr -s ' ' | cut -d ' ' -f 4`
+  if [[ `echo "${table}" | wc -l` == "1" ]]; then
+    APPLICATION_URL=`echo "${table}" | cut -d ' ' -f 4`
   else
     info "More than one application found"
-    exit 1
+    return 1
   fi
 }
 
-getUrlResponseContains() {
-  url=$1
-  expectedText=$2
-  curl -s "${url}" | grep "$expectedText" > /dev/null
+getUrlBodyContains() {
+  url=$1; shift
+  expectedText=$1; shift
+  curl -s "${url}" | grep "${expectedText}" > /dev/null
 }
 
 assertNodeHttpDemoApp() {
@@ -983,9 +1046,12 @@ assertNodeHttpDemoApp() {
 
   waitFor "10 minute" "${name} v${version} in ${environment}" isJxApplication "${environment}" "${name}" "${version}"
 
-  getApplicationUrl "${environment}" "${name}" "$version"
-
-  waitFor "5 minute" "${APPLICATION_URL} responds with ${expectedText}" getUrlResponseContains "${APPLICATION_URL}" "${expectedText}"
+  getApplicationUrl "${environment}" "${name}" "${version}"
+  if [[ "${APPLICATION_URL}" == "" ]]; then
+    info "Unable to get application url"
+    return 1
+  fi
+  waitFor "10 minute" "${name} at '${APPLICATION_URL}' to respond with ${expectedText}" getUrlBodyContains "${APPLICATION_URL}" "${expectedText}"
 
 }
 
@@ -1036,7 +1102,7 @@ EOF
   number=`echo "${response}" | yq eval '.number' -`
   if [[ "$number" == "null" ]]; then
     info "Failed to create PR, response: ${response}"
-    exit 1
+    return 1
   fi
   echo "PR response ${response}"
 
@@ -1065,7 +1131,7 @@ create() {
   configureGiteaOrgAndUsers
   createClusterRepo
   installJx3GitOperator
-  waitForJxPodsToStart
+  waitForJxToStart
 }
 
 testProjectGitops() {
@@ -1078,6 +1144,7 @@ testProjectGitops() {
 ci() {
   create
   testProjectGitops
+  destroy
 }
 
 function misc() {
@@ -1085,30 +1152,38 @@ function misc() {
 }
 
 function ciLoop() {
-  if [ -x ".ci-loop" ]; then
-    rm .ci-loop
-  fi
+
+  rm .ci-loop .ci.*.log 2> /dev/null || true
   i=0
   while true; do
     ((i = i+1))
     echo "`date` ci run $i" >> .ci-loop
-    info "CI RUN ${i}"
-    ci
+    echo "CI RUN ${i}"
+    env LOG_FILE=".ci.${i}.log" bash -l -c "${DIR}/jx3-kind.sh ci"
+    sleep 10
   done
 }
+
 
 function_exists() {
   declare -f -F $1 > /dev/null
   return $?
 }
 
-if `function_exists "${COMMAND}"`; then
-  shift
-  "${COMMAND}" "$@"
-  exit $?
+if [[ "${COMMAND}" == "ciLoop" ]]; then
+  ciLoop
+elif [[ "${COMMAND}" == "env" ]]; then
+  :
 else
-  info "Unknown command : ${COMMAND}"
-  exit 1
+  if `function_exists "${COMMAND}"`; then
+    shift
+    initLog
+    
+    "${COMMAND}" "$@"
+  else
+    info "Unknown command : ${COMMAND}"
+    exit 1
+  fi
 fi
 
 }
