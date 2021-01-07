@@ -460,7 +460,7 @@ expectPodsReadyByLabel() {
 #  kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "${ns}" wait --for=condition=ready pod --selector="${selector}" --timeout="${timeout}"
   
   # conceptually we want to wait for any pod that matches the selector, so doing it this way re-runs the selector each 'waitFor' loop
-  waitFor "10 minute" "$ns : $selector to be ready" isPodReady "${ns}" "${selector}"
+  waitFor "10 minute" "pods in $ns matching $selector to be ready" isPodReady "${ns}" "${selector}"
 
 }
 
@@ -955,7 +955,7 @@ waitForJxToStart() {
   # task from-build-pack has failed: failed to create task run pod "verify-9nv7k-from-build-pack-lmf9q": translating TaskSpec to Pod: secrets "tekton-container-registry-auth" not found. Maybe invalid TaskSpec
   # pod for taskrun verify-9nv7k-from-build-pack-lmf9q not available yet
   # Tasks Completed: 1 (Failed: 1, Cancelled 0), Skipped: 0
-  waitFor "5 minutes" "jx tekton-container-registry-auth secret" expectSecretToExist "jx" "tekton-container-registry-auth"
+  waitFor "5 minutes" "secret tekton-container-registry-auth in namespace jx" expectSecretToExist "jx" "tekton-container-registry-auth"
 
 } 
 
@@ -966,21 +966,30 @@ expectSecretToExist() {
 }
 
 createNodeHttpDemoApp() {
+
+  projectName=${1}; shift
+
   loadGitUserTokens
 
-  step "Create a demo app using the node-http quickstart"
+  step "Create a demo app '${projectName}' using the node-http quickstart"
 
-  jx project quickstart --batch-mode --git-kind gitea --git-username "${DEVELOPER_USER}" --git-token "${developerToken}" -f node-http --pack javascript --org "${ORG}"
+  tmp=`mktemp -d`
+  pushd "${tmp}"
+
+  jx project quickstart --batch-mode --git-kind gitea --git-username "${DEVELOPER_USER}" --git-token "${developerToken}" -f node-http --pack javascript --org "${ORG}" --project-name "${projectName}"
 
   # needed until skip_collaborators is working above in in-repo scheduler
-  substep "Setup ${DEVELOPER_USER} as a colaborator fo the project"
+  substep "Setup ${DEVELOPER_USER} as a colaborator on ${projectName}"
   # developer is already in owners, however the /approve plugin needs them to be a collaborator as well
   curlTokenAuth "${developerToken}"
-  response=`curl -s -X PUT "${GIT_URL}/api/v1/repos/${ORG}/node-http/collaborators/${DEVELOPER_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"permission": "admin"}'`
+  response=`curl -s -X PUT "${GIT_URL}/api/v1/repos/${ORG}/${projectName}/collaborators/${DEVELOPER_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"permission": "admin"}'`
   if [[ "$response" != "" ]]; then
-    info "Failed adding ${DEVELOPER_USER} as a collaborator on node-http\n${response}"
+    info "Failed adding ${DEVELOPER_USER} as a collaborator on ${projectName}\n${response}"
     return 1
   fi
+
+  popd
+  rm -rf "${tmp}"
 
 }
 
@@ -1005,33 +1014,25 @@ waitFor() {
   return 1
 }
 
-isJxApplication() {
-  environment="$1"; shift
-  name="$1"; shift
-  version="$1"; shift
-
-  count=`jx get applications -e "${environment}" "${name}" 2>/dev/null | tail -n +2 | tr -s ' ' | cut -d ' ' -f 2 | grep "${version}" | wc -l  || true`
-  if [[ "${count}" == "1" ]]; then
-    return 0
-  fi
-  return 1
-
-}
-
 APPLICATION_URL=""
 getApplicationUrl() {
-  environment=${1}; shift
-  name=${1}; shift
-  version=${1}; shift
+  environment="${1}"; shift
+  name="${1}"; shift
+  version="${1}"; shift
 
-  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null | (grep "${version}" || true) | tr -s ' '`
-  # info "${table}"
-  if [[ `echo "${table}" | wc -l` == "1" ]]; then
-    APPLICATION_URL=`echo "${table}" | cut -d ' ' -f 4`
-  else
-    info "More than one application found"
-    return 1
-  fi
+  APPLICATION_URL=""
+
+  ## TODO implement PR in jx get to support yaml/json output
+  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null |  tail -n +2 | tr -s ' '`
+  info "${table}"
+  while read n v p u; do
+    if [[ "${v}" == "${version}" ]]; then
+      APPLICATION_URL="${u}"
+      return 0
+    fi
+  done < <(echo "${table}")
+
+  return 1
 }
 
 getUrlBodyContains() {
@@ -1048,39 +1049,53 @@ assertNodeHttpDemoApp() {
 
   step "Verify ${name} is deployed and serving traffic"
 
-  waitFor "10 minute" "${name} v${version} in ${environment}" isJxApplication "${environment}" "${name}" "${version}"
+  waitFor "20 minute" "${name} v${version} in ${environment}" getApplicationUrl "${environment}" "${name}" "${version}"
 
-  getApplicationUrl "${environment}" "${name}" "${version}"
-  if [[ "${APPLICATION_URL}" == "" ]]; then
-    info "Unable to get application url"
-    return 1
-  fi
-  waitFor "10 minute" "${name} at '${APPLICATION_URL}' to respond with ${expectedText}" getUrlBodyContains "${APPLICATION_URL}" "${expectedText}"
+  waitFor "20 minute" "${name} at '${APPLICATION_URL}' to respond with ${expectedText}" getUrlBodyContains "${APPLICATION_URL}" "${expectedText}"
 
 }
 
+# resetGitea() {
+#   #
+#   #
+#   # DANGER : THIS WILL REMOVE ALL GITEA DATA
+#   #
+#   #
+#   step "Resetting Gitea"
+#   substep "Clar gitea data folder which includes the sqlite database and repositories"
+#   kubectl --context "kind-${KIND_CLUSTER_NAME}" -n gitea exec gitea-0 -- rm -rf "/data/*"
+  
+
+#   substep "Restart gitea pod"
+#   kubectl --context "kind-${KIND_CLUSTER_NAME}" -n gitea delete pod gitea-0
+#   sleep 5
+#   expectPodsReadyByLabel gitea app.kubernetes.io/name=gitea
+
+# }
+
 verifyNodeHttpDemoApp() {
-  assertNodeHttpDemoApp "staging" "node-http" "1.0.1" "Jenkins <strong>X</strong>"
+  projectName=$1; shift
+  assertNodeHttpDemoApp "staging" "${projectName}" "1.0.1" "Jenkins <strong>X</strong>"
 }
 
 updateNodeHttpDemoApp() {
+  projectName=$1; shift
   
-  project="node-http"
   branch="update-header-to-jenkins-3"
   message="feat: update header to Jenkins X3"
 
-  step "Update "${project}" demo and create PR"
+  step "Update ${projectName} demo and create PR"
   
   loadGitUserTokens
 
-  substep "Clone ${project}"
+  substep "Clone ${projectName}"
 
   tmp=`mktemp -d`
   pushd "${tmp}"
 
-  git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/${project}"
+  git clone "${GIT_SCHEME}://${DEVELOPER_USER}:${developerToken}@${GIT_HOST}/${ORG}/${projectName}"
 
-  pushd "${project}"
+  pushd "${projectName}"
 
   git checkout -b "${branch}"
   sed -i index.html -e 's|Jenkins <strong>X</strong>|Jenkins <strong>X3</strong>|'
@@ -1102,7 +1117,7 @@ updateNodeHttpDemoApp() {
   }
 EOF
 `
-  response=`echo "${pr}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${project}/pulls" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
+  response=`echo "${pr}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${projectName}/pulls" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
   number=`echo "${response}" | yq eval '.number' -`
   if [[ "$number" == "null" ]]; then
     info "Failed to create PR, response: ${response}"
@@ -1115,16 +1130,22 @@ EOF
   substep "Add /approved comment to the pr so that it will automaticlaly merge"
 
   request='{"body":"/approve"}'
-  response=`echo "${request}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${project}/issues/${number}/comments" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
+  response=`echo "${request}" | curl -s "${GIT_URL}/api/v1/repos/${ORG}/${projectName}/issues/${number}/comments" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data @-`
   # info "${response}"
   # {"id":59,"html_url":"http://gitea.172.21.0.2.nip.io/coders/node-http/pulls/9#issuecomment-59","pull_request_url":"http://gitea.172.21.0.2.nip.io/coders/node-http/pulls/9","issue_url":"","user":{"id":3,"login":"developer","full_name":"developer","email":"developer@example.com","avatar_url":"http://gitea.172.21.0.2.nip.io/user/avatar/developer/-1","language":"en-US","is_admin":true,"last_login":"2021-01-05T09:16:36Z","created":"2021-01-04T15:10:30Z","username":"developer"},"original_author":"","original_author_id":0,"body":"/approve","created_at":"2021-01-05T10:17:13Z","updated_at":"2021-01-05T10:17:13Z"}
 }
 
 verifyUpdatedNodeHttpDemoApp() {
-  assertNodeHttpDemoApp "staging" "node-http" "1.0.2" "Jenkins <strong>X3</strong>"
+  projectName=$1; shift
+  assertNodeHttpDemoApp "staging" "${projectName}" "1.0.2" "Jenkins <strong>X3</strong>"
 }
 
 create() {
+  createInfra
+  startGitops
+}
+
+createInfra() {
   installKind
   installYq
   installHelm
@@ -1132,23 +1153,40 @@ create() {
   configureHelm
   installNginxIngress
   installGitea
+}
+
+startGitops() {
   configureGiteaOrgAndUsers
   createClusterRepo
   installJx3GitOperator
   waitForJxToStart
 }
 
-testProjectGitops() {
-  createNodeHttpDemoApp
-  verifyNodeHttpDemoApp
-  updateNodeHttpDemoApp
-  verifyUpdatedNodeHttpDemoApp
+restartGitops() {
+  step "Uninstall jx3"
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" delete ns jx-git-operator jx jx-staging jx-production
+
+  step "Uninstall gitea"
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" delete ns gitea
+
+  installGitea
+  startGitops
+}
+
+testDemoApp() {
+  createNodeHttpDemoApp 'node-http'
+  verifyNodeHttpDemoApp 'node-http'
+  updateNodeHttpDemoApp 'node-http'
+  verifyUpdatedNodeHttpDemoApp 'node-http'
 }
 
 ci() {
+  
   create
-  testProjectGitops
-  destroy
+  testDemoApp
+
+  # TODO handle errors and ensure that destroy is always called - or should the cluster be left running to diagnose - make it an env CI_DESTROY=true
+  # destroy
 }
 
 function misc() {
