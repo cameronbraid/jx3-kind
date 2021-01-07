@@ -1023,10 +1023,9 @@ getApplicationUrl() {
   APPLICATION_URL=""
 
   ## TODO implement PR in jx get to support yaml/json output
-  table=`jx get applications -e "${environment}" "${name}" 2>/dev/null |  tail -n +2 | tr -s ' '`
-  info "${table}"
-  while read n v p u; do
-    if [[ "${v}" == "${version}" ]]; then
+  table=`jx get applications -e "${environment}" -p "${name}" 2>/dev/null |  tail -n +2 | tr -s ' '`
+  while read n v u; do
+    if [[ "${v}" == "${version}" && "${u}" != "" ]]; then
       APPLICATION_URL="${u}"
       return 0
     fi
