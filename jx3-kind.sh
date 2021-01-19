@@ -989,6 +989,8 @@ createClusterRepo() {
 installJx3GitOperator() {
   loadGitUserTokens
 
+  kubectl create ns jx-git-operator
+
   step "Installing jx3-git-operator"
   # https://jenkins-x.io/v3/admin/guides/operator/#insecure-git-repositories
   #  --setup "git config --global http.sslverify false"
