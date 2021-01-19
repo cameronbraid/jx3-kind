@@ -587,7 +587,7 @@ installYq() {
     curl -L -s https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 > "${yq_bin}"
     chmod +x "${yq_bin}"
   fi
-  yq version
+  yq --version
 }
 
 yq() {
