@@ -19,11 +19,13 @@ DOCKER_NETWORK_NAME=${DOCKER_NETWORK_NAME:-"${NAME}"}
 KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-"${NAME}"}
 JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
 LOG=${LOG:-"file"} #or console
-LOG_FILE=${LOG_FILE:-"log"} #or console
+LOG_FILE=${LOG_FILE:-"log"}
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
 KUBEAPPLY=${KUBEAPPLY:-""}
 KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
+KIND_VERSION="0.9.0"
+YQ_VERSION="4.2.0"
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -46,6 +48,7 @@ DOCKER_REGISTRY_PULL_THROUGH_CACHE_HOST=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_HOS
 DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_PORT:-"5000"}
 DOCKER_REGISTRY_PULL_THROUGH_CACHE_FOLDER=${DOCKER_REGISTRY_PULL_THROUGH_CACHE_FOLDER:-"/media/data-ssd/dev-kube/docker-registry-pull-through-cache"}
 
+
 # thanks https://stackoverflow.com/questions/33056385/increment-ip-address-in-a-shell-script#43196141
 nextip(){
   IP=$1
@@ -55,6 +58,10 @@ nextip(){
   echo "$NEXT_IP"
 }
 IP=`nextip $GATEWAY`
+
+GIT_SCHEME="http"
+GIT_HOST=${GIT_HOST:-"gitea.${IP}.nip.io"}
+GIT_URL="${GIT_SCHEME}://${GIT_HOST}"
 
 declare -a CURL_AUTH=()
 curlBasicAuth() {
@@ -68,9 +75,6 @@ curlTokenAuth() {
   CURL_AUTH=("-H" "Authorization: token ${token}")
 }
 
-GIT_SCHEME="http"
-GIT_HOST="gitea.${IP}.nip.io"
-GIT_URL="${GIT_SCHEME}://${GIT_HOST}"
 curlBasicAuth "gitea_admin" "${GITEA_ADMIN_PASSWORD}"
 CURL_GIT_ADMIN_AUTH=("${CURL_AUTH[@]}")
 declare -a CURL_TYPE_JSON=("-H" "Accept: application/json" "-H" "Content-Type: application/json")
@@ -211,7 +215,7 @@ ingress:
   annotations:
     kubernetes.io/ingress.class: nginx
   hosts:
-    - gitea.${IP}.nip.io
+    - ${GIT_HOST}
 gitea:
   admin:
     password: ${GITEA_ADMIN_PASSWORD}
@@ -235,6 +239,9 @@ FILE_JX_BUILD_CONTROLLER_VALUES_YAML=`cat << 'EOF'
 # image:
 #   repository: gcr.io/jenkinsxio/jx-build-controller
 #   tag: "0.0.20"
+envSecrets:
+  AWS_ACCESS_KEY: "x" # use secret-mapping to map from vault
+  AWS_SECRET_KEY: "x" # use secret-mapping to map from vault
 EOF
 `
 
@@ -516,15 +523,14 @@ giteaCreateUserAndToken() {
   TOKEN="${token}"
 }
 
-
-kind_bin="${DIR}/kind"
+kind_bin="${DIR}/kind-${KIND_VERSION}"
 installKind() {
   if [ -x "${kind_bin}" ] ; then
     # kind in current dir
     :
   else
     step "Installing kind"
-    curl -L -s https://github.com/kubernetes-sigs/kind/releases/download/v0.9.0/kind-linux-amd64 > ${kind_bin}
+    curl -L -s "https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-linux-amd64" > ${kind_bin}
     chmod +x ${kind_bin}
   fi
 }
@@ -548,15 +554,14 @@ helm() {
   "${helm_bin}" "$@"
 }
 
-
-yq_bin="${DIR}/yq"
+yq_bin="${DIR}/yq-${YQ_VERSION}"
 installYq() {
   if [ -x "${yq_bin}" ] ; then
     # yq in current dir
     :
   else
     step "Installing yq"
-    curl -L -s https://github.com/mikefarah/yq/releases/download/v4.2.0/yq_linux_amd64 > "${yq_bin}"
+    curl -L -s https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 > "${yq_bin}"
     chmod +x "${yq_bin}"
   fi
 }
@@ -592,7 +597,10 @@ createKindCluster() {
 
   if [[ "${DOCKER_REGISTRY_PROXY}" == "true" ]]; then
     substep "Build custom node image"
-    buildKindNodeImage
+    buildKindNodeImage || {
+      info "Did you start the docker registry proxy ?"
+      exit 1
+    }
   fi
   # create our own docker network so that we know the node's IP address ahead of time (easier than guessing the next avail IP on the kind network)
   networkId=`docker network create -d bridge --subnet "${SUBNET}" --gateway "${GATEWAY}" "${DOCKER_NETWORK_NAME}"`
@@ -700,22 +708,22 @@ installGitea() {
 
 configureGiteaOrgAndUsers() {
 
-  step "Creating ${DEVELOPER_USER} and ${BOT_USER} users"
+  step "Setting up gitea organisation and users"
 
   giteaCreateUserAndToken "${BOT_USER}" "${BOT_PASS}"
   botToken="${TOKEN}"
-  echo "${botToken}" > ${DIR}/.bot.token
+  echo "${botToken}" > "${DIR}/.${KIND_CLUSTER_NAME}-bot.token"
 
   giteaCreateUserAndToken "${DEVELOPER_USER}" "${DEVELOPER_PASS}"
   developerToken="${TOKEN}"
-  echo "${developerToken}" > ${DIR}/.developer.token
-  step "Creating ${ORG} organisation"
+  echo "${developerToken}" > "${DIR}/.${KIND_CLUSTER_NAME}-developer.token"
+  substep "creating ${ORG} organisation"
 
   curlTokenAuth "${developerToken}"
   json=`curl -s -X POST "${GIT_URL}/api/v1/orgs" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"repo_admin_change_team_access": true, "username": "'${ORG}'", "visibility": "private"}'`
-  info "${json}"
+  # info "${json}"
 
-  step "Add ${BOT_USER} an owner of ${ORG} organisation"
+  substep "add ${BOT_USER} an owner of ${ORG} organisation"
 
   substep "find owners team for ${ORG}"
   curlTokenAuth "${developerToken}"
@@ -733,8 +741,8 @@ configureGiteaOrgAndUsers() {
 }
 
 loadGitUserTokens() {
-  botToken=`cat .bot.token`
-  developerToken=`cat .developer.token`
+  botToken=`cat ".${KIND_CLUSTER_NAME}-bot.token"`
+  developerToken=`cat ".${KIND_CLUSTER_NAME}-developer.token"`
 }
 
 createClusterRepo() {
@@ -842,10 +850,10 @@ createClusterRepo() {
 
 
 
-  substep "configure pipeline-catalog which has trigger.yaml files compatible with latest lighthouse"
+  # substep "configure pipeline-catalog which has trigger.yaml files compatible with latest lighthouse"
 
-  yq eval '(.spec.repositories.[] | select(.label == "JX3 Pipeline Catalog")).gitUrl = "https://github.com/cameronbraid/jx3-pipeline-catalog"' -i extensions/pipeline-catalog.yaml
-  yq eval '(.spec.repositories.[] | select(.label == "JX3 Pipeline Catalog")).gitRef = "master"' -i extensions/pipeline-catalog.yaml
+  # yq eval '(.spec.repositories.[] | select(.label == "JX3 Pipeline Catalog")).gitUrl = "https://github.com/cameronbraid/jx3-pipeline-catalog"' -i extensions/pipeline-catalog.yaml
+  # yq eval '(.spec.repositories.[] | select(.label == "JX3 Pipeline Catalog")).gitRef = "master"' -i extensions/pipeline-catalog.yaml
 
 
 
@@ -883,6 +891,9 @@ createClusterRepo() {
   substep "configure bucketrepo - secret mapping"
   yq eval '.spec.secrets += {"name":"jenkins-x-bucketrepo-env","mappings":[{"name":"AWS_ACCESS_KEY","key":"secret/data/minio","property":"accesskey"},{"name":"AWS_SECRET_KEY","key":"secret/data/minio","property":"secretkey"}]}' -i .jx/secret/mapping/secret-mappings.yaml
 
+  substep "configure jx-build-controller - secret mapping"
+  yq eval '.spec.secrets += {"name":"jx-build-controller-env","mappings":[{"name":"AWS_ACCESS_KEY","key":"secret/data/minio","property":"accesskey"},{"name":"AWS_SECRET_KEY","key":"secret/data/minio","property":"secretkey"}]}' -i .jx/secret/mapping/secret-mappings.yaml
+
   # substep "configure in-repo scheduler"
   # yq eval '.spec.owners |= {}' -i versionStream/schedulers/in-repo.yaml
   # yq eval '.spec.owners.skip_collaborators |= []' -i versionStream/schedulers/in-repo.yaml
@@ -905,7 +916,7 @@ createClusterRepo() {
   yq eval '.spec.cluster.environmentGitOwner = "'${ORG}'"' -i ./jx-requirements.yml
   yq eval '.spec.cluster.gitKind = "gitea"' -i ./jx-requirements.yml
   yq eval '.spec.cluster.gitName = "gitea"' -i ./jx-requirements.yml
-  yq eval '.spec.cluster.gitServer = "http://gitea.'${IP}'.nip.io"' -i ./jx-requirements.yml
+  yq eval '.spec.cluster.gitServer = "http://'${GIT_HOST}'"' -i ./jx-requirements.yml
   yq eval '.spec.cluster.provider = "kind"' -i ./jx-requirements.yml
   yq eval '.spec.environments[0].owner = "'${ORG}'"' -i ./jx-requirements.yml
   yq eval '.spec.environments[0].repository = "jx3-cluster-repo"' -i ./jx-requirements.yml
@@ -983,13 +994,15 @@ createNodeHttpDemoApp() {
   # developer is already in owners, however the /approve plugin needs them to be a collaborator as well
   curlTokenAuth "${developerToken}"
   response=`curl -s -X PUT "${GIT_URL}/api/v1/repos/${ORG}/${projectName}/collaborators/${DEVELOPER_USER}" "${CURL_AUTH[@]}" "${CURL_TYPE_JSON[@]}" --data '{"permission": "admin"}'`
+
+  popd
+  rm -rf "${tmp}"
+
   if [[ "$response" != "" ]]; then
     info "Failed adding ${DEVELOPER_USER} as a collaborator on ${projectName}\n${response}"
     return 1
   fi
 
-  popd
-  rm -rf "${tmp}"
 
 }
 
@@ -1144,18 +1157,22 @@ create() {
   startGitops
 }
 
-createInfra() {
+createInfraBase() {
   installKind
   installYq
   installHelm
   createKindCluster
   configureHelm
   installNginxIngress
+}
+
+createInfra() {
+  createInfraBase
   installGitea
+  configureGiteaOrgAndUsers
 }
 
 startGitops() {
-  configureGiteaOrgAndUsers
   createClusterRepo
   installJx3GitOperator
   waitForJxToStart
@@ -1181,11 +1198,14 @@ testDemoApp() {
 
 ci() {
   
-  create
-  testDemoApp
+  if create; then
+    if testDemoApp; then
+      info "SUCCESS"
+    fi
+  fi
 
-  # TODO handle errors and ensure that destroy is always called - or should the cluster be left running to diagnose - make it an env CI_DESTROY=true
-  # destroy
+  destroy
+
 }
 
 function misc() {
