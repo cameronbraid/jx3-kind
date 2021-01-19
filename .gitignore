@@ -14,5 +14,7 @@ kind
 kind-*
 jx
 jx-*
+kubectl
+kubectl-*
 node-http
 .ci*
