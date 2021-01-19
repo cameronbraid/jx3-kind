@@ -1237,11 +1237,11 @@ else
     initLog
     
     "${COMMAND}" "$@"
-    exit 0
   else
     info "Unknown command : ${COMMAND}"
     exit 1
   fi
 fi
 
+exit 0
 }
