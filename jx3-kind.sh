@@ -551,7 +551,7 @@ installJx() {
     substep "jx already downloaded"
   else
     substep "downloading"
-    curl -L -s "https://github.com/jenkins-x/jx-cli/releases/download/v${JX_VERSION}/jx-cli-linux-amd64.tar.gz" > ${jx_bin}
+    curl -L -s "https://github.com/jenkins-x/jx-cli/releases/download/v${JX_VERSION}/jx-cli-linux-amd64.tar.gz" | gunzip > ${jx_bin}
     chmod +x ${jx_bin}
   fi
   jx version
