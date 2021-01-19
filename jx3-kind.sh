@@ -28,6 +28,7 @@ KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
 KIND_VERSION="0.9.0"
 YQ_VERSION="4.2.0"
 JX_VERSION="3.1.148"
+KUBECTL_VERSION="1.20.0"
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -594,6 +595,26 @@ installYq() {
 yq() {
   "${yq_bin}" "$@"
 }
+
+
+kubectl_bin="${DIR}/kubectl-${YQ_VERSION}"
+installKubectl() {
+  step "Installing kubectl"
+  if [ -x "${kubectl_bin}" ] ; then
+    substep "kubectl already downloaded"
+
+  else
+    substep "downloading"
+    curl -L -s https://storage.googleapis.com/kubernetes-release/release/v1.20.0/bin/linux/amd64/kubectl > "${kubectl_bin}"
+    chmod +x "${kubectl_bin}"
+  fi
+  kubectl version --client
+}
+
+kubectl() {
+  "${kubectl_bin}" "$@"
+}
+
 
 help() {
   # TODO
@@ -1182,6 +1203,7 @@ create() {
   installYq
   installHelm
   installJx
+  installKubectl
   createKindCluster
   configureHelm
   installNginxIngress
