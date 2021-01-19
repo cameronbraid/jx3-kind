@@ -20,12 +20,14 @@ KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-"${NAME}"}
 JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
 LOG=${LOG:-"file"} #or console
 LOG_FILE=${LOG_FILE:-"log"}
+LOG_TIMESTAMPS=${LOG_TIMESTAMPS:-"true"}
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
 KUBEAPPLY=${KUBEAPPLY:-""}
 KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
 KIND_VERSION="0.9.0"
 YQ_VERSION="4.2.0"
+JX_VERSION="3.1.148"
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -97,12 +99,15 @@ initLog() {
 
 # write message to console and log
 info() {
-  date=$(date '+%Y-%m-%d %H:%M:%S')
+  prefix=""
+  if [[ "${LOG_TIMESTAMPS}" == "true" ]]; then
+    prefix="$(date '+%Y-%m-%d %H:%M:%S') "
+  fi
   if [[ "${LOG}" == "file" ]]; then
-    echo -e "${date} $@" >&3
-    echo -e "${date} $@"
+    echo -e "${prefix}$@" >&3
+    echo -e "${prefix}$@"
   else
-    echo -e "${date} $@"
+    echo -e "${prefix}$@"
   fi
 }
 
@@ -525,30 +530,47 @@ giteaCreateUserAndToken() {
 
 kind_bin="${DIR}/kind-${KIND_VERSION}"
 installKind() {
+  step "Installing kind"
   if [ -x "${kind_bin}" ] ; then
-    # kind in current dir
-    :
+    substep "kind already downloaded"
   else
-    step "Installing kind"
+    substep "downloading"
     curl -L -s "https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-linux-amd64" > ${kind_bin}
     chmod +x ${kind_bin}
   fi
+  kind version
 }
 kind() {
   "${kind_bin}" "$@"
 }
 
+jx_bin="${DIR}/jx-${JX_VERSION}"
+installJx() {
+  step "Installing jx"
+  if [ -x "${jx_bin}" ] ; then
+    substep "jx already downloaded"
+  else
+    substep "downloading"
+    curl -L -s "https://github.com/jenkins-x/jx-cli/releases/download/v${JX_VERSION}/jx-cli-linux-amd64.tar.gz" > ${jx_bin}
+    chmod +x ${jx_bin}
+  fi
+  jx version
+}
+jx() {
+  "${jx_bin}" "$@"
+}
 
 helm_bin=`which helm || true`
 installHelm() {
+  step "Installing helm"
   if [ -x "${helm_bin}" ] ; then
-    # helm in path
-    :
+    substep "helm in path"
   else
-    step "Installing helm"
+    substep "downloading"
     curl -s https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | "${helm_bin}"
     helm_bin=`which helm`
   fi
+  helm version
 }
 helm() {
   "${helm_bin}" "$@"
@@ -556,14 +578,16 @@ helm() {
 
 yq_bin="${DIR}/yq-${YQ_VERSION}"
 installYq() {
+  step "Installing yq"
   if [ -x "${yq_bin}" ] ; then
-    # yq in current dir
-    :
+    substep "yq already downloaded"
+
   else
-    step "Installing yq"
+    substep "downloading"
     curl -L -s https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 > "${yq_bin}"
     chmod +x "${yq_bin}"
   fi
+  yq version
 }
 
 yq() {
@@ -1153,40 +1177,18 @@ verifyUpdatedNodeHttpDemoApp() {
 }
 
 create() {
-  createInfra
-  startGitops
-}
-
-createInfraBase() {
   installKind
   installYq
   installHelm
+  installJx
   createKindCluster
   configureHelm
   installNginxIngress
-}
-
-createInfra() {
-  createInfraBase
   installGitea
   configureGiteaOrgAndUsers
-}
-
-startGitops() {
   createClusterRepo
   installJx3GitOperator
   waitForJxToStart
-}
-
-restartGitops() {
-  step "Uninstall jx3"
-  kubectl --context "kind-${KIND_CLUSTER_NAME}" delete ns jx-git-operator jx jx-staging jx-production
-
-  step "Uninstall gitea"
-  kubectl --context "kind-${KIND_CLUSTER_NAME}" delete ns gitea
-
-  installGitea
-  startGitops
 }
 
 testDemoApp() {
@@ -1197,15 +1199,8 @@ testDemoApp() {
 }
 
 ci() {
-  
-  if create; then
-    if testDemoApp; then
-      info "SUCCESS"
-    fi
-  fi
-
-  destroy
-
+  create
+  testDemoApp
 }
 
 function misc() {
@@ -1221,6 +1216,7 @@ function ciLoop() {
     echo "`date` ci run $i" >> .ci-loop
     echo "CI RUN ${i}"
     env LOG_FILE=".ci.${i}.log" bash -l -c "${DIR}/jx3-kind.sh ci"
+    env LOG_FILE=".ci.${i}.log" bash -l -c "${DIR}/jx3-kind.sh destroy"
     sleep 10
   done
 }
@@ -1241,6 +1237,7 @@ else
     initLog
     
     "${COMMAND}" "$@"
+    exit 0
   else
     info "Unknown command : ${COMMAND}"
     exit 1
