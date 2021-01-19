@@ -3,8 +3,6 @@ Tool to create a fully self hosted jx3 cluster using [kind](https://kind.sigs.k8
 
 Requirements (must be pre-installed)
 * docker on linux
-* kubectl
-* jx3 cli
 * sed / tr / cut / base64 / curl
 
 run `./jx3-kind.sh create` will create a single node kubernetes cluster with the following:
