@@ -13,5 +13,6 @@ yq-*
 kind
 kind-*
 jx
+jx-*
 node-http
 .ci*
