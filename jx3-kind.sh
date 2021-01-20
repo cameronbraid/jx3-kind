@@ -27,7 +27,7 @@ KUBEAPPLY=${KUBEAPPLY:-""}
 KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
 KIND_VERSION="0.9.0"
 YQ_VERSION="4.2.0"
-JX_VERSION="3.1.148"
+JX_VERSION="3.1.155"
 KUBECTL_VERSION="1.20.0"
 
 # if docker-registry-proxy should be used
