@@ -17,14 +17,14 @@ GATEWAY=${GATEWAY:-"172.21.0.1"}
 NAME=${NAME:-"jx3"}
 DOCKER_NETWORK_NAME=${DOCKER_NETWORK_NAME:-"${NAME}"}
 KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-"${NAME}"}
-JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"false"}
+JX_GITOPS_UPGRADE=${JX_GITOPS_UPGRADE:-"true"}
 LOG=${LOG:-"file"} #or console
 LOG_FILE=${LOG_FILE:-"log"}
 LOG_TIMESTAMPS=${LOG_TIMESTAMPS:-"true"}
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-""}
-KUBEAPPLY=${KUBEAPPLY:-""}
-KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
+KUBEAPPLY=${KUBEAPPLY:-""} # kapp-apply
+KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"true"}
 KIND_VERSION=${KIND_VERSION:-"0.10.0"}
 YQ_VERSION=${YQ_VERSION:-"4.2.0"}
 JX_VERSION=${JX_VERSION:-"3.1.155"}
@@ -730,14 +730,16 @@ configureHelm() {
   substep "gitea-charts"
   helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add gitea-charts https://dl.gitea.io/charts/ 
 
-  substep "banzaicloud-stable"
-  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add banzaicloud-stable https://kubernetes-charts.banzaicloud.com
-  
-  substep "jx3"
-  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add jx3 https://storage.googleapis.com/jenkinsxio/charts
-  
-  substep "external-secrets"
-  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add external-secrets https://external-secrets.github.io/kubernetes-external-secrets
+  if [ "${PRE_INSTALL_SECRET_INFRA}" == "true" ]; then
+    substep "banzaicloud-stable"
+    helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add banzaicloud-stable https://kubernetes-charts.banzaicloud.com
+    
+    substep "jx3"
+    helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add jx3 https://storage.googleapis.com/jenkinsxio/charts
+    
+    substep "external-secrets"
+    helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add external-secrets https://external-secrets.github.io/kubernetes-external-secrets
+  fi
 
   substep "helm repo update"
   helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo update 
