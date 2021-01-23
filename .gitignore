@@ -16,5 +16,7 @@ jx
 jx-*
 kubectl
 kubectl-*
+kpt
+kpt-*
 node-http
 .ci*

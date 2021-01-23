@@ -22,13 +22,15 @@ LOG=${LOG:-"file"} #or console
 LOG_FILE=${LOG_FILE:-"log"}
 LOG_TIMESTAMPS=${LOG_TIMESTAMPS:-"true"}
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
-LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-"0.0.900"}
+LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-""}
 KUBEAPPLY=${KUBEAPPLY:-""}
 KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"false"}
-KIND_VERSION="0.9.0"
-YQ_VERSION="4.2.0"
-JX_VERSION="3.1.155"
-KUBECTL_VERSION="1.20.0"
+KIND_VERSION=${KIND_VERSION:-"0.10.0"}
+YQ_VERSION=${YQ_VERSION:-"4.2.0"}
+JX_VERSION=${JX_VERSION:-"3.1.155"}
+KUBECTL_VERSION=${KUBECTL_VERSION:-"1.20.0"}
+KPT_VERSION=${KPT_VERSION:-"0.37.1"}
+PRE_INSTALL_SECRET_INFRA="true"
 
 # if docker-registry-proxy should be used
 DOCKER_REGISTRY_PROXY=${DOCKER_REGISTRY_PROXY:-"false"}
@@ -158,7 +160,7 @@ EOF
 `
 
 FILE_KIND_NODE_IMAGE_DOCKERFILE=`cat <<EOF
-FROM kindest/node:v1.19.1
+FROM kindest/node:v1.20.2@sha256:8f7ea6e7642c0da54f04a7ee10431549c0257315b3a634f6ef2fecaaedb19bab
 ADD http://${DOCKER_REGISTRY_PROXY_HOST}:${DOCKER_REGISTRY_PROXY_PORT}/ca.crt /usr/share/ca-certificates/docker_registry_proxy.crt
 RUN echo "docker_registry_proxy.crt" >> /etc/ca-certificates.conf && \
     update-ca-certificates --fresh && \
@@ -531,7 +533,7 @@ giteaCreateUserAndToken() {
 
 kind_bin="${DIR}/kind-${KIND_VERSION}"
 installKind() {
-  step "Installing kind"
+  step "Installing kind ${KIND_VERSION}"
   if [ -x "${kind_bin}" ] ; then
     substep "kind already downloaded"
   else
@@ -547,7 +549,7 @@ kind() {
 
 jx_bin="${DIR}/jx-${JX_VERSION}"
 installJx() {
-  step "Installing jx"
+  step "Installing jx ${JX_VERSION}"
   if [ -x "${jx_bin}" ] ; then
     substep "jx already downloaded"
   else
@@ -580,7 +582,7 @@ helm() {
 
 yq_bin="${DIR}/yq-${YQ_VERSION}"
 installYq() {
-  step "Installing yq"
+  step "Installing yq ${YQ_VERSION}"
   if [ -x "${yq_bin}" ] ; then
     substep "yq already downloaded"
 
@@ -597,15 +599,15 @@ yq() {
 }
 
 
-kubectl_bin="${DIR}/kubectl-${YQ_VERSION}"
+kubectl_bin="${DIR}/kubectl-${KUBECTL_VERSION}"
 installKubectl() {
-  step "Installing kubectl"
+  step "Installing kubectl ${KUBECTL_VERSION}"
   if [ -x "${kubectl_bin}" ] ; then
     substep "kubectl already downloaded"
 
   else
     substep "downloading"
-    curl -L -s https://storage.googleapis.com/kubernetes-release/release/v1.20.0/bin/linux/amd64/kubectl > "${kubectl_bin}"
+    curl -L -s https://storage.googleapis.com/kubernetes-release/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl > "${kubectl_bin}"
     chmod +x "${kubectl_bin}"
   fi
   kubectl version --client
@@ -614,6 +616,27 @@ installKubectl() {
 kubectl() {
   "${kubectl_bin}" "$@"
 }
+
+
+kpt_bin="${DIR}/kpt-${KPT_VERSION}"
+installKpt() {
+  step "Installing kpt ${KPT_VERSION}"
+  if [ -x "${kpt_bin}" ] ; then
+    substep "kpt already downloaded"
+
+  else
+    substep "downloading"
+    curl -L -s https://github.com/GoogleContainerTools/kpt/releases/download/v${KPT_VERSION}/kpt_linux_amd64-${KPT_VERSION}.tar.gz | tar -xzf - kpt
+    mv kpt "${kpt_bin}"
+    chmod +x "${kpt_bin}"
+  fi
+  kpt version
+}
+
+kpt() {
+  "${kpt_bin}" "$@"
+}
+
 
 
 help() {
@@ -702,9 +725,20 @@ configureHelm() {
   step "Configuring helm chart repositories"
 
   substep "ingress-nginx"
-  helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  
   substep "gitea-charts"
-  helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo add gitea-charts https://dl.gitea.io/charts/ 
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add gitea-charts https://dl.gitea.io/charts/ 
+
+  substep "banzaicloud-stable"
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add banzaicloud-stable https://kubernetes-charts.banzaicloud.com
+  
+  substep "jx3"
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add jx3 https://storage.googleapis.com/jenkinsxio/charts
+  
+  substep "external-secrets"
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" repo add external-secrets https://external-secrets.github.io/kubernetes-external-secrets
+
   substep "helm repo update"
   helm --kube-context "kind-${KIND_CLUSTER_NAME}"  repo update 
 }
@@ -722,12 +756,57 @@ installNginxIngress() {
 
 }
 
+installSecretInfra() {
+  step "Installing Secret Infra"
+
+  kubectl --context "kind-${KIND_CLUSTER_NAME}" create namespace secret-infra
+
+  substep "vault-operator"
+
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" install \
+    vault-operator \
+    --version 1.10.0 \
+    --namespace secret-infra \
+    banzaicloud-stable/vault-operator
+
+  substep "vault-instance"
+
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" template \
+    vault-instance \
+    --version 1.0.6 \
+    --namespace secret-infra \
+    --set ingress.enabled=false \
+    jx3/vault-instance | kpt cfg grep --invert-match "kind=Release"  | kubectl --context "kind-${KIND_CLUSTER_NAME}" --namespace secret-infra apply -f -
+
+  substep "external-secrets"
+
+  helm --kube-context "kind-${KIND_CLUSTER_NAME}" install \
+    kubernetes-external-secrets \
+    --version 6.0.0 \
+    --namespace secret-infra \
+    --set "crds.create=true" \
+    --set "env.VAULT_ADDR=https://vault:8200" \
+    --set "env.NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ca.crt" \
+    --set "filesFromSecret.vault-ca.secret=vault-tls" \
+    --set "filesFromSecret.vault-ca.mountPath=/usr/local/share/ca-certificates" \
+    external-secrets/kubernetes-external-secrets
+
+  substep "Waiting for Vault to start"
+
+  expectPodsReadyByLabel secret-infra app.kubernetes.io/name=vault
+
+  substep "Waiting for External Secrets to start"
+  
+  expectPodsReadyByLabel secret-infra app.kubernetes.io/instance=kubernetes-external-secrets
+
+}
+
 installGitea() {
   step "Installing Gitea"
 
   kubectl --context "kind-${KIND_CLUSTER_NAME}" create namespace gitea 
 
-  echo "${FILE_GITEA_VALUES_YAML}" | helm --kube-context "kind-${KIND_CLUSTER_NAME}"  install --namespace gitea -f - gitea gitea-charts/gitea 
+  echo "${FILE_GITEA_VALUES_YAML}" | helm --kube-context "kind-${KIND_CLUSTER_NAME}" install --namespace gitea -f - gitea gitea-charts/gitea 
 
   substep "Waiting for Gitea to start"
 
@@ -851,12 +930,14 @@ createClusterRepo() {
   substep "remove jx3/local-external-secrets release"
   yq eval 'del( .releases.[] | select(.name == "local-external-secrets") )' -i helmfiles/jx/helmfile.yaml
 
-  substep "add secret-infra helmfile"
-  mkdir helmfiles/secret-infra -p
-  
-  echo "${FILE_SECRET_INFRA_HELMFILE}" > helmfiles/secret-infra/helmfile.yaml
+  if [ "${PRE_INSTALL_SECRET_INFRA}" != "true" ]; then
+    substep "add secret-infra helmfile"
+    mkdir helmfiles/secret-infra -p
+    echo "${FILE_SECRET_INFRA_HELMFILE}" > helmfiles/secret-infra/helmfile.yaml
+    yq eval '.helmfiles += {"path":"helmfiles/secret-infra/helmfile.yaml"}' -i ./helmfile.yaml
+  fi
 
-  yq eval '.helmfiles += {"path":"helmfiles/secret-infra/helmfile.yaml"}' -i ./helmfile.yaml
+  substep "configure secret store to be vault"
   yq eval '.spec.defaults.backendType = "vault"' -i .jx/secret/mapping/secret-mappings.yaml
   git add .
   git commit -a -m 'feat: configure vault'
@@ -866,14 +947,17 @@ createClusterRepo() {
 
   echo "${FILE_JX_LIGTHHOUSE_VALUES_YAML}" > helmfiles/jx/jx-ligthhouse-values.yaml
   yq eval '(.releases.[] | select(.name == "lighthouse")).values += "jx-ligthhouse-values.yaml"' -i helmfiles/jx/helmfile.yaml
-  yq eval '(.releases.[] | select(.name == "lighthouse")).version = "'${LIGHTHOUSE_VERSION}'"' -i helmfiles/jx/helmfile.yaml
-  yq eval '.version = "'${LIGHTHOUSE_VERSION}'"' -i versionStream/charts/jenkins-x/lighthouse/defaults.yaml
+
+  if [ "${LIGHTHOUSE_VERSION}" != "" ]; then
+    yq eval '(.releases.[] | select(.name == "lighthouse")).version = "'${LIGHTHOUSE_VERSION}'"' -i helmfiles/jx/helmfile.yaml
+    yq eval '.version = "'${LIGHTHOUSE_VERSION}'"' -i versionStream/charts/jenkins-x/lighthouse/defaults.yaml
+  fi
 
   # # newer lighthouse enforces that trigger is a pattern and that rerun_command MUST match it
   # yq eval '(.spec.presubmits.[] | select(.name == "verify")).trigger = "(?m)^\/(re)?test"' -i .lighthouse/jenkins-x/triggers.yaml
 
   git add .
-  git commit -a -m 'feat: patch lighthouse config'
+  git commit -a -m 'feat: configure ligthhouse'
 
 
   ## DOCKER_REGISTRY_PULL_THROUGH_CACHE
@@ -885,8 +969,11 @@ createClusterRepo() {
 
   echo "${FILE_JX_LIGTHHOUSE_VALUES_YAML}" > helmfiles/jx/jx-ligthhouse-values.yaml
   yq eval '(.releases.[] | select(.name == "lighthouse")).values += "jx-ligthhouse-values.yaml"' -i helmfiles/jx/helmfile.yaml
-  yq eval '(.releases.[] | select(.name == "lighthouse")).version = "'${LIGHTHOUSE_VERSION}'"' -i helmfiles/jx/helmfile.yaml
-  yq eval '.version = "'${LIGHTHOUSE_VERSION}'"' -i versionStream/charts/jenkins-x/lighthouse/defaults.yaml
+
+  if [ "${LIGHTHOUSE_VERSION}" != "" ]; then
+    yq eval '(.releases.[] | select(.name == "lighthouse")).version = "'${LIGHTHOUSE_VERSION}'"' -i helmfiles/jx/helmfile.yaml
+    yq eval '.version = "'${LIGHTHOUSE_VERSION}'"' -i versionStream/charts/jenkins-x/lighthouse/defaults.yaml
+  fi
 
   # # newer lighthouse enforces that trigger is a pattern and that rerun_command MUST match it
   # yq eval '(.spec.presubmits.[] | select(.name == "verify")).trigger = "(?m)^\/(re)?test"' -i .lighthouse/jenkins-x/triggers.yaml
@@ -1204,10 +1291,14 @@ create() {
   installHelm
   installJx
   installKubectl
+  installKpt
   createKindCluster
   configureHelm
   installNginxIngress
   installGitea
+  if [ "${PRE_INSTALL_SECRET_INFRA}" == "true" ]; then
+    installSecretInfra
+  fi
   configureGiteaOrgAndUsers
   createClusterRepo
   installJx3GitOperator
