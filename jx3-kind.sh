@@ -23,7 +23,7 @@ LOG_FILE=${LOG_FILE:-"log"}
 LOG_TIMESTAMPS=${LOG_TIMESTAMPS:-"true"}
 GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD:-"abcdEFGH"}
 LIGHTHOUSE_VERSION=${LIGHTHOUSE_VERSION:-""}
-KUBEAPPLY=${KUBEAPPLY:-""} # kapp-apply
+KAPP=${KAPP:-"true"}
 KAPP_DEPLOY_WAIT=${KAPP_DEPLOY_WAIT:-"true"}
 KIND_VERSION=${KIND_VERSION:-"0.10.0"}
 YQ_VERSION=${YQ_VERSION:-"4.2.0"}
@@ -899,8 +899,12 @@ createClusterRepo() {
     jx gitops upgrade
   fi
 
-  if [[ "${KUBEAPPLY}" != "" ]]; then
-    sed -e 's/^KUBEAPPLY .*$/KUBEAPPLY \?\= '${KUBEAPPLY}'/g' -i versionStream/src/Makefile.mk
+  if [[ "${KAPP}" == "true" ]]; then
+    sed -e 's|^KUBEAPPLY .*$|KUBEAPPLY \?\= kapp-apply|g' -i versionStream/src/Makefile.mk
+    sed -e 's|kapp deploy|kapp deploy -c|g'  -i versionStream/src/Makefile.mk
+    sed -e 's|apply: regen-check kubectl-apply secrets-populate verify write-completed|apply: regen-check $(KUBEAPPLY) secrets-populate verify write-completed|g'  -i versionStream/src/Makefile.mk
+    # hack to upgrade the cli and therefore jx-secret
+    sed -e 's|	# lets make sure all the namespaces exist|	jx upgrade cli --version 3.1.162\n	-VAULT_ADDR=$(VAULT_ADDR) jx secret populate --source filesystem\n	# lets make sure all the namespaces exist|g' -i versionStream/src/Makefile.mk
   fi
 
   if [[ "${KAPP_DEPLOY_WAIT}" == "false" ]]; then
